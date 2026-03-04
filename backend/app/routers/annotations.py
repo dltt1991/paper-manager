@@ -179,7 +179,7 @@ def delete_native_annotation(
     """
     check_paper_access(db, paper_id, current_user)
     
-    success = AnnotationService.delete_native_annotation(paper_id, annot_id)
+    success = AnnotationService.delete_native_annotation(db, paper_id, annot_id)
     if not success:
         raise HTTPException(status_code=400, detail="删除原生批注失败")
     return {"success": True}
@@ -204,7 +204,7 @@ def update_native_annotation(
     """
     check_paper_access(db, paper_id, current_user)
     
-    success = AnnotationService.update_native_annotation(paper_id, annot_id, content)
+    success = AnnotationService.update_native_annotation(db, paper_id, annot_id, content)
     if not success:
         raise HTTPException(status_code=400, detail="更新原生批注失败")
     return {"success": True}

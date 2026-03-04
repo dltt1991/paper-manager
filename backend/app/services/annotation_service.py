@@ -93,18 +93,18 @@ class AnnotationService:
         return result
     
     @staticmethod
-    def delete_native_annotation(paper_id: int, annot_id: str) -> bool:
+    def delete_native_annotation(db: Session, paper_id: int, annot_id: str) -> bool:
         """删除PDF原生批注"""
-        paper = Paper.query.filter(Paper.id == paper_id).first()
+        paper = db.query(Paper).filter(Paper.id == paper_id).first()
         if not paper or not paper.file_path:
             return False
         
         return PDFAnnotationExtractor.remove_annotation(paper.file_path, annot_id)
     
     @staticmethod
-    def update_native_annotation(paper_id: int, annot_id: str, content: str) -> bool:
+    def update_native_annotation(db: Session, paper_id: int, annot_id: str, content: str) -> bool:
         """更新PDF原生批注"""
-        paper = Paper.query.filter(Paper.id == paper_id).first()
+        paper = db.query(Paper).filter(Paper.id == paper_id).first()
         if not paper or not paper.file_path:
             return False
         
