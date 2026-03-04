@@ -7,7 +7,9 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
-    proxy: {
+    // 仅在未设置 VITE_API_BASE_URL 时使用代理（本地开发模式）
+    // 跨机器访问时，前端直接使用 VITE_API_BASE_URL 连接后端
+    proxy: process.env.VITE_API_BASE_URL ? undefined : {
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
