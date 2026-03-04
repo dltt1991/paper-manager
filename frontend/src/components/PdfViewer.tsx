@@ -1427,7 +1427,9 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
           </Button>
         ]}
         width={500}
-        getContainer={containerNode || undefined}
+        // 修复：使用 document.body 作为容器，避免 PDF 容器阻止输入事件
+        getContainer={() => document.body}
+        style={{ top: 100 }}
       >
         {editingNativeAnnot && (
           <>
