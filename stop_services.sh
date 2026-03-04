@@ -27,6 +27,9 @@ else
     echo "无"
 fi
 
+# 切换到脚本所在目录
+cd "$(dirname "$0")"
+
 # 从PID文件停止后端服务
 if [ -f ".backend.pid" ]; then
     BACKEND_PID=$(cat .backend.pid)

@@ -47,18 +47,44 @@ export interface PaperUpdate {
 }
 
 export interface Annotation {
-  id: number;
-  paper_id: number;
+  id: number | string;  // 支持数字ID和字符串ID（原生批注）
+  paper_id?: number;
   page_number: number;  // 后端返回 page_number
-  type: 'highlight' | 'text';
+  type: 'highlight' | 'text' | 'ink';
   x: number;
   y: number;
   width?: number;
   height?: number;
   content?: string;
   color?: string;
-  created_at: string;
-  updated_at: string;
+  created_at?: string;
+  updated_at?: string;
+  is_native?: boolean;  // 标记是否为PDF原生批注
+  author?: string;      // 原生批注的作者
+}
+
+// PDF原生批注
+export interface NativeAnnotation {
+  id: string;
+  page_number: number;
+  type: 'highlight' | 'text' | 'ink';
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color?: string;
+  content?: string;
+  author?: string;
+  creation_date?: string;
+  modified_date?: string;
+  is_native: true;
+}
+
+// 批注查询响应
+export interface AnnotationsResponse {
+  system: Annotation[];
+  native: NativeAnnotation[];
+  total_count: number;
 }
 
 export interface AnnotationCreate {

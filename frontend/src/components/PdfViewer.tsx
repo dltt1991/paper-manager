@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Button, Tooltip, message, Spin, Input, Space, Modal, Radio } from 'antd';
 import { 
@@ -15,7 +15,7 @@ import {
 } from '@ant-design/icons';
 import { annotationsApi, filesApi } from '../api';
 import apiClient from '../api';
-import type { Annotation } from '../types';
+import type { Annotation, NativeAnnotation } from '../types';
 // Import react-pdf styles
 import '/node_modules/react-pdf/dist/Page/AnnotationLayer.css';
 import '/node_modules/react-pdf/dist/Page/TextLayer.css';
@@ -27,8 +27,11 @@ interface PdfViewerProps {
   paperId: number;
   filePath?: string;
   url?: string;
-  annotations: Annotation[];
+  annotations: Annotation[];  // 系统批注
+  nativeAnnotations?: NativeAnnotation[];  // 新增：原生批注
   onAnnotationsChange: (annotations: Annotation[]) => void;
+  onNativeAnnotationDelete?: (annotId: string) => void;  // 新增：删除原生批注回调
+  onNativeAnnotationUpdate?: (annotId: string, content: string) => void;  // 新增：更新原生批注回调
   readOnly?: boolean;
 }
 
@@ -76,7 +79,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   filePath,
   url,
   annotations,
+  nativeAnnotations: externalNativeAnnotations,
   onAnnotationsChange,
+  onNativeAnnotationDelete,
+  onNativeAnnotationUpdate,
   readOnly = false,
 }) => {
   const [numPages, setNumPages] = useState<number>(0);
@@ -111,47 +117,15 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   const [clearType, setClearType] = useState<'highlight' | 'text' | null>(null);
   const [clearLoading, setClearLoading] = useState(false);
   
-  // 全局去重 annotations（防止父组件传递重复数据）
-  const dedupedAnnotations = useMemo(() => {
-    const seen = new Set<number>();
-    const seenPositions = new Set<string>();
-    const result: Annotation[] = [];
-    const duplicates: Array<{id: number, reason: string}> = [];
-    
-    for (const a of annotations) {
-      if (a.id && !seen.has(a.id)) {
-        seen.add(a.id);
-        result.push(a);
-      } else if (a.id && seen.has(a.id)) {
-        duplicates.push({ id: a.id, reason: '重复ID' });
-      } else if (!a.id) {
-        // 没有 id 的 annotation，使用位置信息去重（增加容差）
-        const key = `${a.page_number}-${Math.round(a.x)}-${Math.round(a.y)}-${a.type}`;
-        if (!seenPositions.has(key)) {
-          seenPositions.add(key);
-          result.push(a);
-        } else {
-          console.warn(`[dedupedAnnotations] 跳过无ID重复annotation: page=${a.page_number}, x=${a.x}, y=${a.y}`);
-        }
-      }
-    }
-    
-    if (result.length !== annotations.length) {
-      console.warn(`[PdfViewer] Annotations 去重: ${annotations.length} -> ${result.length}`);
-      if (duplicates.length > 0) {
-        console.warn('[PdfViewer] 重复 IDs:', duplicates);
-      }
-    }
-    
-    // 调试：输出每页的annotation数量
-    const pageCounts: Record<number, number> = {};
-    result.forEach(a => {
-      pageCounts[a.page_number] = (pageCounts[a.page_number] || 0) + 1;
-    });
-    console.log('[dedupedAnnotations] 每页annotation数量:', pageCounts);
-    
-    return result;
-  }, [annotations]);
+  // 页面渲染优化状态
+  const [renderedPages, setRenderedPages] = useState<Set<number>>(new Set()); // 已渲染的页面
+  const [currentPage, setCurrentPage] = useState<number>(1); // 当前中心页面
+  
+  // 原生批注编辑状态
+  const [nativeAnnotModalVisible, setNativeAnnotModalVisible] = useState(false);
+  const [nativeAnnotContent, setNativeAnnotContent] = useState('');
+  const [nativeAnnotLoading, setNativeAnnotLoading] = useState(false);
+  const [editingNativeAnnot, setEditingNativeAnnot] = useState<NativeAnnotation | null>(null);
   
   // 容器节点状态（用于 Modal getContainer）
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
@@ -165,6 +139,51 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   const modalOpenRef = useRef<boolean>(false);
   // 标记是否正在执行工具栏操作（防止点击按钮时关闭工具框）
   const toolbarActionRef = useRef<boolean>(false);
+
+  // 全局去重 annotations（防止父组件传递重复数据）
+  const dedupedAnnotations = useMemo(() => {
+    const seen = new Set<number>();
+    const seenPositions = new Set<string>();
+    const result: Annotation[] = [];
+    const duplicates: Array<{id: number, reason: string}> = [];
+    
+    for (const a of annotations) {
+      if (a.id && !seen.has(a.id as number)) {
+        seen.add(a.id as number);
+        result.push(a);
+      } else if (a.id && seen.has(a.id as number)) {
+        duplicates.push({ id: a.id as number, reason: '重复ID' });
+      } else if (!a.id) {
+        // 没有 id 的 annotation，使用位置信息去重（增加容差）
+        const key = `${a.page_number}-${Math.round(a.x)}-${Math.round(a.y)}-${a.type}`;
+        if (!seenPositions.has(key)) {
+          seenPositions.add(key);
+          result.push(a);
+        }
+      }
+    }
+    
+    if (result.length !== annotations.length) {
+      console.warn(`[PdfViewer] Annotations 去重: ${annotations.length} -> ${result.length}`);
+      if (duplicates.length > 0) {
+        console.warn('[PdfViewer] 重复 IDs:', duplicates);
+      }
+    }
+    
+    return result;
+  }, [annotations]);
+
+  // 计算智能渲染范围（只渲染当前页前后各2页 + 已渲染的页面）
+  const renderPageRange = useMemo(() => {
+    const range = new Set<number>();
+    // 渲染当前页前后各2页
+    for (let i = Math.max(1, currentPage - 2); i <= Math.min(numPages, currentPage + 2); i++) {
+      range.add(i);
+    }
+    // 合并已渲染的页面（缓存机制）
+    renderedPages.forEach(page => range.add(page));
+    return range;
+  }, [currentPage, numPages, renderedPages]);
 
   // 构建PDF URL
   const pdfUrl = React.useMemo(() => {
@@ -227,9 +246,9 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       setTimeout(() => {
         // 如果正在执行工具栏操作，不处理
         if (toolbarActionRef.current) {
-          console.log('[handleMouseUp] 工具栏操作中，跳过处理');
           return;
         }
+
         const selection = window.getSelection();
         if (!selection || selection.isCollapsed) {
           setTextSelection(null);
@@ -271,10 +290,6 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
           const clientRects = range.getClientRects();
           const rects: TextSelectionInfo['rects'] = [];
 
-          // 调试：输出原始 clientRects 信息
-          console.log(`[handleMouseUp] 原始 clientRects 数量: ${clientRects.length}`);
-          console.log(`[handleMouseUp] 选中文本: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
-
           for (let i = 0; i < clientRects.length; i++) {
             const rect = clientRects[i];
             // 确保矩形在页面范围内
@@ -286,11 +301,8 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                 height: rect.height / scale,
               };
               
-              // 改进的去重逻辑：使用更严格的阈值，并考虑缩放比例
-              // 根据缩放比例调整阈值，确保在不同缩放级别下都能正确去重
-              const threshold = Math.max(0.1, 0.5 / scale);
-              
               // 检查是否已存在相同位置的矩形（去重）
+              const threshold = Math.max(0.1, 0.5 / scale);
               const isDuplicate = rects.some(r => 
                 Math.abs(r.left - newRect.left) < threshold && 
                 Math.abs(r.top - newRect.top) < threshold &&
@@ -298,26 +310,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                 Math.abs(r.height - newRect.height) < threshold
               );
               
-              // 额外的行级去重：检查是否在同一行（y坐标非常接近）且水平重叠
-              const isOverlappingLine = rects.some(r => {
-                const sameLine = Math.abs(r.top - newRect.top) < threshold;
-                const horizontalOverlap = !(r.left + r.width < newRect.left || newRect.left + newRect.width < r.left);
-                return sameLine && horizontalOverlap;
-              });
-              
-              if (!isDuplicate && !isOverlappingLine) {
+              if (!isDuplicate) {
                 rects.push(newRect);
-              } else if (isDuplicate) {
-                console.log(`[handleMouseUp] 跳过重复矩形 #${i}:`, newRect);
-              } else if (isOverlappingLine) {
-                console.log(`[handleMouseUp] 跳过重叠行矩形 #${i}:`, newRect);
               }
             }
-          }
-
-          console.log(`[handleMouseUp] 去重后 rects 数量: ${rects.length}`);
-          if (rects.length > 0) {
-            console.log(`[handleMouseUp] 最终 rects:`, rects.map(r => ({ left: r.left.toFixed(1), top: r.top.toFixed(1), width: r.width.toFixed(1) })));
           }
 
           if (rects.length === 0) {
@@ -345,32 +341,20 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
 
     // 点击其他地方隐藏工具框
     const handleClickOutside = (e: MouseEvent) => {
-      // 检查点击目标是否在颜色选择器内（优先检查）
-      const target = e.target as HTMLElement;
-      if (target.closest('.color-picker-container')) {
-        console.log('[handleClickOutside] 点击在颜色选择器内，不处理');
-        return; // 点击在颜色选择器内，不处理
-      }
-      
-      // 检查点击目标是否在工具框内
-      if (toolbarRef.current && toolbarRef.current.contains(e.target as Node)) {
-        console.log('[handleClickOutside] 点击在工具框内，不处理');
-        return; // 点击在工具框内，不处理
-      }
-      
-      // 如果正在执行工具栏操作，不要关闭（延迟消费标志）
+      // 如果正在执行工具栏操作，不要关闭
       if (toolbarActionRef.current) {
-        console.log('[handleClickOutside] 工具栏操作中，延迟消费标志');
-        // 延迟消费标志，确保颜色选择器等操作能完成
-        setTimeout(() => {
-          toolbarActionRef.current = false;
-        }, 100);
+        toolbarActionRef.current = false; // 消费掉这个标志
         return;
       }
       
       // 如果弹窗打开了，不要清除选择
       if (modalOpenRef.current) {
         return;
+      }
+      
+      // 检查点击目标是否在工具框内
+      if (toolbarRef.current && toolbarRef.current.contains(e.target as Node)) {
+        return; // 点击在工具框内，不处理
       }
       
       // 检查当前是否有文本选择，如果有则不隐藏（让用户可以继续操作）
@@ -380,7 +364,6 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       }
       
       // 点击在工具框外且没有文本选择，关闭工具框
-      console.log('[handleClickOutside] 关闭工具框');
       setToolbarPosition(prev => ({ ...prev, visible: false }));
       window.getSelection()?.removeAllRanges();
       setTextSelection(null);
@@ -395,44 +378,84 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     };
   }, [readOnly, scale]);
 
-  // 滚动监听
+  // 滚动监听 - 优化版本（防抖 + 智能预加载）
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
+    let scrollTimeout: NodeJS.Timeout;
+    
     const handleScroll = () => {
-      const containerRect = container.getBoundingClientRect();
-      const newVisiblePages = new Set<number>();
+      // 清除之前的定时器（防抖）
+      clearTimeout(scrollTimeout);
       
-      pageRefs.current.forEach((pageEl, pageNum) => {
-        const pageRect = pageEl.getBoundingClientRect();
-        const isVisible = (
-          pageRect.top < containerRect.bottom + 200 &&
-          pageRect.bottom > containerRect.top - 200
-        );
-        if (isVisible) {
-          newVisiblePages.add(pageNum);
-        }
-      });
-      
-      setVisiblePages(newVisiblePages);
+      scrollTimeout = setTimeout(() => {
+        const containerRect = container.getBoundingClientRect();
+        const containerCenter = containerRect.top + containerRect.height / 2;
+        
+        let closestPage = 1;
+        let minDistance = Infinity;
+        const newVisiblePages = new Set<number>();
+        
+        pageRefs.current.forEach((pageEl, pageNum) => {
+          const pageRect = pageEl.getBoundingClientRect();
+          const pageCenter = pageRect.top + pageRect.height / 2;
+          const distance = Math.abs(pageCenter - containerCenter);
+          
+          // 检查页面是否在可视区域内（上下各扩展 300px）
+          const isVisible = (
+            pageRect.top < containerRect.bottom + 300 &&
+            pageRect.bottom > containerRect.top - 300
+          );
+          
+          if (isVisible) {
+            newVisiblePages.add(pageNum);
+          }
+          
+          // 找到距离视口中心最近的页面作为当前页
+          if (distance < minDistance) {
+            minDistance = distance;
+            closestPage = pageNum;
+          }
+        });
+        
+        setCurrentPage(closestPage);
+        setVisiblePages(newVisiblePages);
+        
+        // 将可见页面加入已渲染集合（缓存）
+        setRenderedPages(prev => {
+          const updated = new Set(prev);
+          newVisiblePages.forEach(page => updated.add(page));
+          return updated;
+        });
+      }, 100); // 100ms 防抖
     };
 
-    container.addEventListener('scroll', handleScroll);
-    setTimeout(handleScroll, 100);
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    // 初始计算
+    setTimeout(handleScroll, 200);
     
-    return () => container.removeEventListener('scroll', handleScroll);
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+      clearTimeout(scrollTimeout);
+    };
   }, [numPages]);
 
   const loadAnnotations = async () => {
     try {
       const data = await annotationsApi.getAnnotations(paperId);
-      // 去重：确保每个 annotation id 只出现一次
-      const uniqueData = Array.from(new Map(data.map((a: Annotation) => [a.id, a])).values());
-      if (uniqueData.length !== data.length) {
-        console.warn(`批注去重: ${data.length} -> ${uniqueData.length}`);
+      // 处理系统批注
+      const systemAnnotations = data.system || [];
+      const uniqueSystemData = Array.from(new Map(systemAnnotations.map((a: Annotation) => [a.id, a])).values());
+      if (uniqueSystemData.length !== systemAnnotations.length) {
+        console.warn(`批注去重: ${systemAnnotations.length} -> ${uniqueSystemData.length}`);
       }
-      onAnnotationsChange(uniqueData);
+      onAnnotationsChange(uniqueSystemData);
+      
+      // 处理原生批注（如果提供了外部原生批注则优先使用）
+      if (!externalNativeAnnotations && data.native) {
+        console.log(`[PdfViewer] 加载了 ${data.native.length} 个PDF原生批注`);
+      }
     } catch (error: any) {
       console.error('加载批注失败:', error);
     }
@@ -440,11 +463,14 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
 
   const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
+    // 初始只渲染前3页
     const initialPages = new Set<number>();
     for (let i = 1; i <= Math.min(3, numPages); i++) {
       initialPages.add(i);
     }
     setVisiblePages(initialPages);
+    setRenderedPages(initialPages);
+    setCurrentPage(1);
   };
 
   const onDocumentLoadError = (error: Error) => {
@@ -452,8 +478,28 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     message.error('PDF加载失败');
   };
 
-  const handleZoomIn = () => setScale(prev => Math.min(prev + 0.2, 3));
-  const handleZoomOut = () => setScale(prev => Math.max(prev - 0.2, 0.5));
+  // 缩放控制 - 缩放时清理缓存并重新计算可视页面
+  const handleZoomIn = () => {
+    setScale(prev => {
+      const newScale = Math.min(prev + 0.2, 3);
+      // 缩放后清理已渲染页面缓存（强制重新渲染）
+      if (newScale !== prev) {
+        setRenderedPages(new Set([currentPage]));
+      }
+      return newScale;
+    });
+  };
+  
+  const handleZoomOut = () => {
+    setScale(prev => {
+      const newScale = Math.max(prev - 0.2, 0.5);
+      // 缩放后清理已渲染页面缓存（强制重新渲染）
+      if (newScale !== prev) {
+        setRenderedPages(new Set([currentPage]));
+      }
+      return newScale;
+    });
+  };
 
   // 隐藏工具框
   const hideToolbar = () => {
@@ -503,8 +549,8 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       const combined = [...dedupedAnnotations, ...newAnnotations];
       const uniqueMap = new Map<number, Annotation>();
       combined.forEach(a => {
-        if (a.id && !uniqueMap.has(a.id)) {
-          uniqueMap.set(a.id, a);
+        if (a.id && !uniqueMap.has(a.id as number)) {
+          uniqueMap.set(a.id as number, a);
         }
       });
       onAnnotationsChange(Array.from(uniqueMap.values()));
@@ -583,8 +629,8 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       const combined = [...dedupedAnnotations, ...newAnnotations];
       const uniqueMap = new Map<number, Annotation>();
       combined.forEach(a => {
-        if (a.id && !uniqueMap.has(a.id)) {
-          uniqueMap.set(a.id, a);
+        if (a.id && !uniqueMap.has(a.id as number)) {
+          uniqueMap.set(a.id as number, a);
         }
       });
       onAnnotationsChange(Array.from(uniqueMap.values()));
@@ -621,18 +667,11 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       savedSelectionRef.current = { ...textSelection };
     }
     
-    // 标记正在执行工具栏操作，阻止 handleClickOutside 关闭工具框
-    toolbarActionRef.current = true;
+    // 标记弹窗已打开（阻止 handleClickOutside 关闭工具框）
+    modalOpenRef.current = true;
     
     // 立即关闭工具框
     setToolbarPosition({ x: 0, y: 0, visible: false });
-    
-    // 清除文本选择
-    window.getSelection()?.removeAllRanges();
-    setTextSelection(null);
-    
-    // 标记弹窗已打开
-    modalOpenRef.current = true;
     
     // 打开弹窗并执行翻译
     setTranslateModalVisible(true);
@@ -690,6 +729,45 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     }
   };
 
+  // 删除原生批注
+  const handleDeleteNativeAnnotation = async (annotationId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!onNativeAnnotationDelete) return;
+    
+    try {
+      await onNativeAnnotationDelete(annotationId);
+      message.success('PDF原生批注已删除');
+    } catch (error: any) {
+      message.error('删除失败: ' + error.message);
+    }
+  };
+
+  // 编辑原生批注
+  const handleEditNativeAnnotation = (annotation: NativeAnnotation) => {
+    if (!onNativeAnnotationUpdate) return;
+    setEditingNativeAnnot(annotation);
+    setNativeAnnotContent(annotation.content || '');
+    setNativeAnnotModalVisible(true);
+  };
+
+  // 保存原生批注修改
+  const handleSaveNativeAnnotation = async () => {
+    if (!editingNativeAnnot || !onNativeAnnotationUpdate) return;
+    
+    setNativeAnnotLoading(true);
+    try {
+      await onNativeAnnotationUpdate(editingNativeAnnot.id, nativeAnnotContent);
+      message.success('PDF原生批注已更新');
+      setNativeAnnotModalVisible(false);
+      setEditingNativeAnnot(null);
+      setNativeAnnotContent('');
+    } catch (error: any) {
+      message.error('更新失败: ' + error.message);
+    } finally {
+      setNativeAnnotLoading(false);
+    }
+  };
+
   // 显示清除确认对话框
   const showClearConfirm = (type: 'highlight' | 'text') => {
     const typeNames = {
@@ -729,34 +807,17 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   const renderPageAnnotations = (pageNum: number) => {
     // 使用全局去重后的 annotations
     const pageAnnotations = dedupedAnnotations.filter(a => a.page_number === pageNum);
+    const pageNativeAnnotations = (externalNativeAnnotations || []).filter(a => a.page_number === pageNum);
     
-    // 额外的渲染级去重（防止同一位置重复渲染）
-    const renderSeen = new Set<string>();
-    const uniquePageAnnotations = pageAnnotations.filter(a => {
-      const key = `${a.id}-${Math.round(a.x)}-${Math.round(a.y)}-${a.type}`;
-      if (renderSeen.has(key)) {
-        console.warn(`[renderPageAnnotations] 跳过重复渲染: id=${a.id}, page=${pageNum}, x=${a.x}, y=${a.y}`);
-        return false;
-      }
-      renderSeen.add(key);
-      return true;
-    });
-    
-    if (uniquePageAnnotations.length !== pageAnnotations.length) {
-      console.warn(`[renderPageAnnotations] 页面 ${pageNum} 渲染去重: ${pageAnnotations.length} -> ${uniquePageAnnotations.length}`);
-    }
-    
-    const highlights = uniquePageAnnotations.filter(a => a.type === 'highlight');
-    const texts = uniquePageAnnotations.filter(a => a.type === 'text');
-    
-    console.log(`[renderPageAnnotations] 页面 ${pageNum}: 高亮=${highlights.length}, 批注=${texts.length}`);
+    const highlights = pageAnnotations.filter(a => a.type === 'highlight');
+    const texts = pageAnnotations.filter(a => a.type === 'text');
     
     return (
       <>
-        {/* 高亮批注 - 添加 will-change 优化渲染性能 */}
-        {highlights.map((annotation, index) => (
+        {/* 系统高亮批注 */}
+        {highlights.map(annotation => (
           <div
-            key={`highlight-${annotation.id}-${index}`}
+            key={`highlight-${annotation.id}`}
             style={{
               position: 'absolute',
               left: annotation.x * scale,
@@ -769,14 +830,15 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
               zIndex: 10,
               pointerEvents: 'auto',
               borderRadius: 2,
-              willChange: 'transform', // 优化渲染性能
+              willChange: 'transform',
+              border: '1px solid rgba(0,0,0,0.2)',
             }}
-            onClick={(e) => !readOnly && handleDeleteAnnotation(annotation.id, e)}
+            onClick={(e) => !readOnly && handleDeleteAnnotation(annotation.id as number, e)}
             title={annotation.content || '点击删除高亮'}
           />
         ))}
 
-        {/* 文本批注 - 下划线 */}
+        {/* 系统文本批注 */}
         {texts.map((annotation, index) => (
           <Tooltip
             key={`text-${annotation.id}-${index}`}
@@ -811,7 +873,66 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                 borderRadius: 1,
                 willChange: 'transform',
               }}
-              onClick={(e) => !readOnly && handleDeleteAnnotation(annotation.id, e)}
+              onClick={(e) => !readOnly && handleDeleteAnnotation(annotation.id as number, e)}
+            />
+          </Tooltip>
+        ))}
+
+        {/* PDF原生批注 */}
+        {pageNativeAnnotations.map((annotation) => (
+          <Tooltip
+            key={`native-${annotation.id}`}
+            title={
+              <div style={{ maxWidth: 300 }}>
+                <div style={{ fontWeight: 'bold', marginBottom: 4, color: '#faad14' }}>
+                  📄 PDF原生批注
+                  {annotation.author && <span style={{ fontWeight: 'normal', color: '#999' }}> by {annotation.author}</span>}
+                </div>
+                {annotation.content && (
+                  <div style={{ wordBreak: 'break-word', marginBottom: 4 }}>
+                    {annotation.content}
+                  </div>
+                )}
+                {annotation.creation_date && (
+                  <div style={{ fontSize: 11, color: '#999' }}>
+                    创建: {new Date(annotation.creation_date).toLocaleString()}
+                  </div>
+                )}
+                <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>
+                  点击删除，双击编辑
+                </div>
+              </div>
+            }
+            placement="top"
+            color="white"
+            overlayStyle={{ maxWidth: 320, zIndex: 100 }}
+            overlayInnerStyle={{
+              color: '#333',
+              backgroundColor: '#fff',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+              borderRadius: 4,
+              padding: '8px 12px',
+            }}
+            getPopupContainer={(triggerNode) => triggerNode.parentElement || document.body}
+          >
+            <div
+              style={{
+                position: 'absolute',
+                left: annotation.x * scale,
+                top: annotation.y * scale,
+                width: (annotation.width || 50) * scale,
+                height: (annotation.height || 20) * scale,
+                backgroundColor: annotation.color || '#faad14',
+                opacity: 0.3,
+                cursor: readOnly ? 'default' : 'pointer',
+                zIndex: 11,
+                pointerEvents: 'auto',
+                borderRadius: 2,
+                willChange: 'transform',
+                border: '2px dashed #faad14',
+              }}
+              onClick={(e) => !readOnly && handleDeleteNativeAnnotation(annotation.id, e)}
+              onDoubleClick={() => !readOnly && handleEditNativeAnnotation(annotation)}
             />
           </Tooltip>
         ))}
@@ -942,29 +1063,33 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                     第 {pageNum} / {numPages} 页
                   </div>
                   
-                  {/* PDF 页面 */}
-                  {visiblePages.has(pageNum) ? (
-                    <Page
+                  {/* PDF 页面 - 优化渲染逻辑 */}
+                  {renderPageRange.has(pageNum) ? (
+                    <MemoizedPage
                       pageNumber={pageNum}
                       scale={scale}
-                      renderTextLayer={true}
-                      renderAnnotationLayer={true}
+                      renderTextLayer={visiblePages.has(pageNum)} // 只在可见页面渲染文本层
+                      renderAnnotationLayer={false} // 禁用内置批注层（使用自定义批注）
                       loading={
                         <div style={{ width: 600 * scale, height: 800 * scale, backgroundColor: '#fff' }}>
-                          <Spin />
+                          <Spin size="small" />
                         </div>
                       }
+                      onRenderSuccess={() => {
+                        // 页面渲染成功后加入缓存
+                        setRenderedPages(prev => new Set(prev).add(pageNum));
+                      }}
                     />
                   ) : (
                     <div style={{ 
                       width: 600 * scale, 
                       height: 800 * scale, 
-                      backgroundColor: '#f5f5f5',
+                      backgroundColor: '#525659',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
                     }}>
-                      <Spin />
+                      <span style={{ color: '#999', fontSize: 14 }}>第 {pageNum} 页</span>
                     </div>
                   )}
                   
@@ -1078,17 +1203,9 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
             }}
             onClick={(e) => {
               e.stopPropagation();
-              e.preventDefault();
               toolbarActionRef.current = true;
-              console.log('[ColorPicker] onClick - 设置 toolbarActionRef = true');
             }}
             onMouseDown={(e) => {
-              e.stopPropagation();
-              e.preventDefault();
-              toolbarActionRef.current = true;
-              console.log('[ColorPicker] onMouseDown - 设置 toolbarActionRef = true');
-            }}
-            onMouseUp={(e) => {
               e.stopPropagation();
               toolbarActionRef.current = true;
             }}
@@ -1099,21 +1216,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                 title={name}
                 onClick={(e) => {
                   e.stopPropagation();
-                  e.preventDefault();
                   toolbarActionRef.current = true;
-                  console.log(`[ColorPicker] 选择颜色 ${name}`);
                   setSelectedColor(color);
-                  // 延迟重置标志，确保 handleClickOutside 不会立即关闭工具框
-                  setTimeout(() => {
-                    toolbarActionRef.current = false;
-                  }, 200);
                 }}
                 onMouseDown={(e) => {
-                  e.stopPropagation();
-                  e.preventDefault();
-                  toolbarActionRef.current = true;
-                }}
-                onMouseUp={(e) => {
                   e.stopPropagation();
                   toolbarActionRef.current = true;
                 }}
@@ -1132,7 +1238,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
         </div>
       )}
 
-      {/* 翻译结果弹窗 - 支持选择翻译提供商 */}
+      {/* 翻译结果弹窗 */}
       <Modal
         title={
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1252,15 +1358,15 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
             type="primary" 
             onClick={handleCreateComment}
             loading={commentLoading}
-            disabled={!commentContent.trim()}
           >
             保存
           </Button>
         ]}
+        width={500}
         getContainer={containerNode || undefined}
       >
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontWeight: 500, marginBottom: 8, color: '#666' }}>选中内容：</div>
+          <div style={{ fontWeight: 500, marginBottom: 8, color: '#666' }}>选中的文本：</div>
           <div style={{ 
             padding: 12, 
             backgroundColor: '#f5f5f5', 
@@ -1268,31 +1374,97 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
             maxHeight: 100,
             overflow: 'auto',
             wordBreak: 'break-word',
-            fontSize: 12
+            fontStyle: 'italic'
           }}>
-            {(savedSelectionRef.current?.text || textSelection?.text)}
+            {savedSelectionRef.current?.text || textSelection?.text}
           </div>
         </div>
         <div>
           <div style={{ fontWeight: 500, marginBottom: 8, color: '#666' }}>批注内容：</div>
           <Input.TextArea
-            rows={4}
-            placeholder="请输入批注内容..."
             value={commentContent}
-            onChange={e => setCommentContent(e.target.value)}
-            autoFocus
-            onPressEnter={(e) => {
-              if (e.shiftKey) return;
-              e.preventDefault();
-              if (commentContent.trim() && !commentLoading) {
-                handleCreateComment();
-              }
-            }}
+            onChange={(e) => setCommentContent(e.target.value)}
+            placeholder="请输入批注内容..."
+            rows={4}
+            disabled={commentLoading}
           />
         </div>
       </Modal>
 
-      {/* 清除确认对话框 */}
+      {/* 原生批注编辑弹窗 */}
+      <Modal
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <EditOutlined style={{ color: '#faad14' }} />
+            <span>编辑PDF原生批注</span>
+          </div>
+        }
+        open={nativeAnnotModalVisible}
+        onCancel={() => {
+          setNativeAnnotModalVisible(false);
+          setEditingNativeAnnot(null);
+          setNativeAnnotContent('');
+        }}
+        footer={[
+          <Button 
+            key="cancel" 
+            onClick={() => {
+              setNativeAnnotModalVisible(false);
+              setEditingNativeAnnot(null);
+              setNativeAnnotContent('');
+            }}
+            disabled={nativeAnnotLoading}
+          >
+            取消
+          </Button>,
+          <Button 
+            key="save" 
+            type="primary" 
+            onClick={handleSaveNativeAnnotation}
+            loading={nativeAnnotLoading}
+          >
+            保存
+          </Button>
+        ]}
+        width={500}
+        getContainer={containerNode || undefined}
+      >
+        {editingNativeAnnot && (
+          <>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ 
+                display: 'inline-block',
+                padding: '4px 8px',
+                backgroundColor: '#fff7e6',
+                border: '1px solid #ffd591',
+                borderRadius: 4,
+                color: '#fa8c16',
+                fontSize: 12,
+                marginBottom: 8
+              }}>
+                📄 PDF原生批注
+              </div>
+              {editingNativeAnnot.author && (
+                <div style={{ color: '#666', fontSize: 13, marginBottom: 8 }}>
+                  作者: {editingNativeAnnot.author}
+                </div>
+              )}
+            </div>
+            <div>
+              <div style={{ fontWeight: 500, marginBottom: 8, color: '#666' }}>批注内容：</div>
+              <Input.TextArea
+                value={nativeAnnotContent}
+                onChange={(e) => setNativeAnnotContent(e.target.value)}
+                placeholder="请输入批注内容..."
+                rows={4}
+                disabled={nativeAnnotLoading}
+              />
+            </div>
+          </>
+        )}
+      </Modal>
+
+      {/* 清除确认弹窗 */}
       {clearModalVisible && (
         <div style={{
           position: 'fixed',
@@ -1300,33 +1472,31 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
           left: 0,
           right: 0,
           bottom: 0,
-          backgroundColor: 'rgba(0, 0, 0, 0.45)',
-          zIndex: 999999,
+          backgroundColor: 'rgba(0,0,0,0.5)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          zIndex: 10000,
         }}>
           <div style={{
             backgroundColor: '#fff',
             borderRadius: 8,
-            width: 420,
+            padding: 0,
+            width: 400,
             boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
           }}>
-            {/* 标题 */}
             <div style={{
               padding: '16px 24px',
               borderBottom: '1px solid #f0f0f0',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
             }}>
-              <ExclamationCircleOutlined style={{ color: '#ff4d4f', fontSize: 20 }} />
-              <span style={{ fontSize: 16, fontWeight: 500 }}>确认清除</span>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 500 }}>
+                <ExclamationCircleOutlined style={{ color: '#faad14', marginRight: 8 }} />
+                确认清除
+              </h3>
             </div>
             
-            {/* 内容 */}
-            <div style={{ padding: 24 }}>
-              <p style={{ margin: 0, marginBottom: 8 }}>
+            <div style={{ padding: '24px' }}>
+              <p style={{ margin: '0 0 8px 0' }}>
                 确定要清除所有
                 <strong style={{ color: '#ff4d4f', margin: '0 4px' }}>
                   {clearType === 'highlight' ? '高亮' : '文本批注'}
@@ -1370,5 +1540,35 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     </div>
   );
 };
+
+// 优化的 Page 组件 - 使用 memo 避免不必要的重渲染
+const MemoizedPage = React.memo<{
+  pageNumber: number;
+  scale: number;
+  renderTextLayer: boolean;
+  renderAnnotationLayer: boolean;
+  loading: React.ReactNode;
+  onRenderSuccess?: () => void;
+}>(({ pageNumber, scale, renderTextLayer, renderAnnotationLayer, loading, onRenderSuccess }) => {
+  return (
+    <Page
+      pageNumber={pageNumber}
+      scale={scale}
+      renderTextLayer={renderTextLayer}
+      renderAnnotationLayer={renderAnnotationLayer}
+      loading={loading}
+      onRenderSuccess={onRenderSuccess}
+      // 使用 devicePixelRatio 优化渲染质量
+      devicePixelRatio={typeof window !== 'undefined' ? Math.min(window.devicePixelRatio, 2) : 1}
+    />
+  );
+}, (prevProps, nextProps) => {
+  // 自定义比较函数：只有关键属性变化时才重新渲染
+  return (
+    prevProps.pageNumber === nextProps.pageNumber &&
+    prevProps.scale === nextProps.scale &&
+    prevProps.renderTextLayer === nextProps.renderTextLayer
+  );
+});
 
 export default PdfViewer;

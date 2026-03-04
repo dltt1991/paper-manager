@@ -27,10 +27,10 @@ import {
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { papersApi } from '../api';
+import { papersApi, annotationsApi } from '../api';
 import PdfViewer from '../components/PdfViewer';
 import AISummary from '../components/AISummary';
-import type { Paper, Annotation } from '../types';
+import type { Paper, Annotation, NativeAnnotation } from '../types';
 
 const { Title, Text } = Typography;
 
@@ -55,6 +55,7 @@ const PaperDetail: React.FC = () => {
   const navigate = useNavigate();
   const [paper, setPaper] = useState<Paper | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [nativeAnnotations, setNativeAnnotations] = useState<NativeAnnotation[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   
   // 全屏状态
@@ -129,10 +130,53 @@ const PaperDetail: React.FC = () => {
     try {
       const paperData = await papersApi.getPaper(Number(id));
       setPaper(paperData);
+      // 加载批注（系统批注 + 原生批注）
+      await fetchAnnotations();
     } catch (error: any) {
       message.error('获取论文详情失败: ' + error.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  // 加载批注（系统批注 + PDF原生批注）
+  const fetchAnnotations = async () => {
+    if (!id) return;
+    try {
+      const data = await annotationsApi.getAnnotations(Number(id));
+      setAnnotations(data.system || []);
+      setNativeAnnotations(data.native || []);
+      console.log(`[PaperDetail] 加载批注: 系统 ${data.system?.length || 0} 个, 原生 ${data.native?.length || 0} 个`);
+    } catch (error: any) {
+      console.error('加载批注失败:', error);
+    }
+  };
+
+  // 处理原生批注删除
+  const handleNativeAnnotationDelete = async (annotId: string) => {
+    if (!id) return;
+    try {
+      await annotationsApi.deleteNativeAnnotation(Number(id), annotId);
+      // 重新加载批注
+      await fetchAnnotations();
+      message.success('PDF原生批注已删除');
+    } catch (error: any) {
+      message.error('删除失败: ' + error.message);
+      throw error;
+    }
+  };
+
+  // 处理原生批注更新
+  const handleNativeAnnotationUpdate = async (annotId: string, content: string) => {
+    if (!id) return;
+    try {
+      await annotationsApi.updateNativeAnnotation(Number(id), annotId, content);
+      // 重新加载批注
+      await fetchAnnotations();
+      message.success('PDF原生批注已更新');
+    } catch (error: any) {
+      message.error('更新失败: ' + error.message);
+      throw error;
     }
   };
 
@@ -439,7 +483,10 @@ const PaperDetail: React.FC = () => {
                   filePath={paper.file_path}
                   url={paper.url}
                   annotations={annotations}
+                  nativeAnnotations={nativeAnnotations}
                   onAnnotationsChange={setAnnotations}
+                  onNativeAnnotationDelete={handleNativeAnnotationDelete}
+                  onNativeAnnotationUpdate={handleNativeAnnotationUpdate}
                 />
               ) : (
                 <Empty

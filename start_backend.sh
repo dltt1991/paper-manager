@@ -1,7 +1,9 @@
 #!/bin/bash
 # 启动后端服务
 
-cd "$(dirname "$0")/backend"
+# 切换到脚本所在目录
+cd "$(dirname "$0")"
+cd backend
 
 echo "=========================================="
 echo "   启动论文管理系统后端"

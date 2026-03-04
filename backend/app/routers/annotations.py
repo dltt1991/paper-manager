@@ -1,8 +1,8 @@
 """
 批注相关API路由
 """
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException
+from typing import List, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -51,21 +51,41 @@ def create_annotation(
     return AnnotationService.create_annotation(db, paper_id, annotation_data)
 
 
-@router.get("/papers/{paper_id}/annotations", response_model=List[AnnotationResponse])
+@router.get("/papers/{paper_id}/annotations")
 def get_annotations(
     paper_id: int,
+    include_native: bool = Query(True, description="是否包含PDF原生批注"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """
-    获取批注列表
+    获取批注列表（包含系统批注和PDF原生批注）
     
     - **paper_id**: 论文ID
+    - **include_native**: 是否包含PDF原生批注（默认true）
     
     需要认证，只能查看自己的论文批注
+    
+    返回格式：
+    {
+        "system": [...],  // 系统批注列表
+        "native": [...],  // PDF原生批注列表
+        "total_count": 10  // 总批注数
+    }
     """
     check_paper_access(db, paper_id, current_user)
-    return AnnotationService.get_annotations(db, paper_id)
+    result = AnnotationService.get_annotations(db, paper_id, include_native)
+    
+    # 转换系统批注为响应格式
+    system_annotations = [
+        AnnotationResponse.model_validate(a) for a in result['system']
+    ]
+    
+    return {
+        "system": [a.model_dump() for a in system_annotations],
+        "native": result['native'],
+        "total_count": result['total_count']
+    }
 
 
 @router.put("/papers/{paper_id}/annotations/{annotation_id}", response_model=AnnotationResponse)
@@ -140,3 +160,51 @@ def delete_annotations_by_type(
     
     count = AnnotationService.delete_annotations_by_type(db, paper_id, annotation_type)
     return {"deleted": count}
+
+
+@router.delete("/papers/{paper_id}/native-annotations/{annot_id}")
+def delete_native_annotation(
+    paper_id: int,
+    annot_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    删除PDF原生批注
+    
+    - **paper_id**: 论文ID
+    - **annot_id**: 原生批注ID
+    
+    需要认证，只能删除自己的论文批注
+    """
+    check_paper_access(db, paper_id, current_user)
+    
+    success = AnnotationService.delete_native_annotation(paper_id, annot_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="删除原生批注失败")
+    return {"success": True}
+
+
+@router.put("/papers/{paper_id}/native-annotations/{annot_id}")
+def update_native_annotation(
+    paper_id: int,
+    annot_id: str,
+    content: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """
+    更新PDF原生批注内容
+    
+    - **paper_id**: 论文ID
+    - **annot_id**: 原生批注ID
+    - **content**: 新内容
+    
+    需要认证，只能更新自己的论文批注
+    """
+    check_paper_access(db, paper_id, current_user)
+    
+    success = AnnotationService.update_native_annotation(paper_id, annot_id, content)
+    if not success:
+        raise HTTPException(status_code=400, detail="更新原生批注失败")
+    return {"success": True}

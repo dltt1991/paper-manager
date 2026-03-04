@@ -5,6 +5,7 @@ import type {
   PaperUpdate, 
   Annotation, 
   AnnotationCreate,
+  AnnotationsResponse,
   AISummary,
   PaperListParams,
   PaperListResponse,
@@ -326,9 +327,11 @@ export const papersApi = {
 
 // ========== 批注相关API ==========
 export const annotationsApi = {
-  // 获取论文的所有批注
-  getAnnotations: async (paperId: number): Promise<Annotation[]> => {
-    const response = await apiClient.get(`/annotations/papers/${paperId}/annotations`);
+  // 获取论文的所有批注（包含系统批注和PDF原生批注）
+  getAnnotations: async (paperId: number, includeNative: boolean = true): Promise<AnnotationsResponse> => {
+    const response = await apiClient.get(`/annotations/papers/${paperId}/annotations`, {
+      params: { include_native: includeNative }
+    });
     return response.data;
   },
 
@@ -354,6 +357,18 @@ export const annotationsApi = {
     const response = await apiClient.delete(`/annotations/papers/${paperId}/annotations/by-type`, {
       params: { annotation_type: type }
     });
+    return response.data;
+  },
+
+  // 删除PDF原生批注
+  deleteNativeAnnotation: async (paperId: number, annotId: string): Promise<{ success: boolean }> => {
+    const response = await apiClient.delete(`/annotations/papers/${paperId}/native-annotations/${annotId}`);
+    return response.data;
+  },
+
+  // 更新PDF原生批注内容
+  updateNativeAnnotation: async (paperId: number, annotId: string, content: string): Promise<{ success: boolean }> => {
+    const response = await apiClient.put(`/annotations/papers/${paperId}/native-annotations/${annotId}?content=${encodeURIComponent(content)}`);
     return response.data;
   },
 };

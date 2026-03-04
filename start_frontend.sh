@@ -1,7 +1,9 @@
 #!/bin/bash
 # 启动前端服务
 
-cd "$(dirname "$0")/frontend"
+# 切换到脚本所在目录
+cd "$(dirname "$0")"
+cd frontend
 
 echo "=========================================="
 echo "   启动论文管理系统前端"
