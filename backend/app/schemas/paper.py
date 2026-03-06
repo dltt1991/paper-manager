@@ -50,6 +50,8 @@ class PaperResponse(PaperBase):
     updated_at: datetime
     annotation_count: int = Field(0, description="批注数量")
     extracted_metadata: Optional[Dict[str, Any]] = Field(None, description="自动提取的PDF元数据")
+    owner_username: Optional[str] = Field(None, description="所有者用户名（用于全局搜索）")
+    user_id: Optional[int] = Field(None, description="所属用户ID")
     
     # 兼容前端的url字段
     @computed_field

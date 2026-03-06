@@ -33,8 +33,7 @@ if [ ! -f "backend/.venv/bin/activate" ]; then
 fi
 
 cd backend
-source .venv/bin/activate
-nohup uvicorn main:app --host 0.0.0.0 --port 8000 --reload > backend.log 2>&1 &
+nohup .venv/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload > backend.log 2>&1 &
 BACKEND_PID=$!
 echo $BACKEND_PID > ../.backend.pid
 sleep 3

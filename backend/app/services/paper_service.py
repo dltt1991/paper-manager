@@ -137,72 +137,82 @@ class PaperService:
         """从URL创建论文记录"""
         import httpx
         
+        temp_file_path = None
+        
         try:
             # 下载PDF文件
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.get(url_data.url, follow_redirects=True)
-                response.raise_for_status()
-                
-                # 检查内容类型
-                content_type = response.headers.get("content-type", "").lower()
-                if "pdf" not in content_type and not url_data.url.endswith(".pdf"):
-                    # 尝试继续，但记录警告
-                    logger.warning(f"URL内容类型可能不是PDF: {content_type}")
-                
-                content = response.content
-                file_size = len(content)
-                
-                if file_size > settings.MAX_FILE_SIZE:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"文件大小超过限制: {settings.MAX_FILE_SIZE / 1024 / 1024}MB"
-                    )
-                
-                # 生成文件名
-                original_filename = Path(url_data.url).name or "paper.pdf"
-                if "=" in original_filename:
-                    original_filename = original_filename.split("=")[-1]
-                if not original_filename.endswith(".pdf"):
-                    original_filename += ".pdf"
-                
-                file_path, unique_filename = cls.generate_file_path(original_filename)
-                
-                # 保存文件
-                with open(file_path, "wb") as f:
-                    f.write(content)
-                
-                # 自动提取PDF元数据
-                extracted_metadata = {}
-                try:
-                    extracted_metadata = extract_pdf_metadata(file_path)
-                    logger.info(f"从URL下载的PDF提取的元数据: {extracted_metadata}")
-                except Exception as e:
-                    logger.warning(f"PDF元数据提取失败: {e}")
-                
-                # 创建数据库记录
-                # 优先级：用户输入 > 提取的元数据 > 文件名
-                db_paper = Paper(
-                    title=url_data.title or extracted_metadata.get("title") or original_filename,
-                    authors=url_data.authors or extracted_metadata.get("authors"),
-                    abstract=url_data.abstract or extracted_metadata.get("abstract"),
-                    publication_date=url_data.publication_date or extracted_metadata.get("publication_date"),
-                    keywords=url_data.keywords or extracted_metadata.get("keywords"),
-                    doi=extracted_metadata.get("doi"),
-                    file_path=file_path,
-                    file_name=original_filename,
-                    file_size=file_size,
-                    source_url=url_data.url,
-                    user_id=user_id
+            logger.info(f"开始下载PDF: {url_data.url}")
+            
+            # 使用同步客户端在异步上下文中执行
+            import asyncio
+            
+            def download_file():
+                with httpx.Client(timeout=180.0, follow_redirects=True) as client:
+                    response = client.get(url_data.url)
+                    response.raise_for_status()
+                    return response.content
+            
+            # 在线程池中执行同步下载
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(None, download_file)
+            
+            file_size = len(content)
+            logger.info(f"下载完成，文件大小: {file_size / (1024 * 1024):.2f} MB")
+            
+            if file_size > settings.MAX_FILE_SIZE:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文件大小超过限制: {settings.MAX_FILE_SIZE / 1024 / 1024}MB"
                 )
-                db.add(db_paper)
-                db.commit()
-                db.refresh(db_paper)
-                
-                # 附加提取的元数据到返回对象（供前端展示）
-                db_paper._extracted_metadata = extracted_metadata
-                
-                logger.info(f"从URL创建论文成功: {db_paper.id}, 标题: {db_paper.title}, 用户: {user_id}")
-                return db_paper
+            
+            # 生成文件名
+            original_filename = Path(url_data.url).name or "paper.pdf"
+            if "=" in original_filename:
+                original_filename = original_filename.split("=")[-1]
+            if not original_filename.endswith(".pdf"):
+                original_filename += ".pdf"
+            
+            file_path, unique_filename = cls.generate_file_path(original_filename)
+            temp_file_path = file_path
+            
+            # 保存文件
+            with open(file_path, "wb") as f:
+                f.write(content)
+            
+            logger.info(f"文件已保存到: {file_path}")
+            
+            # 自动提取PDF元数据
+            extracted_metadata = {}
+            try:
+                extracted_metadata = extract_pdf_metadata(file_path)
+                logger.info(f"从URL下载的PDF提取的元数据: {extracted_metadata}")
+            except Exception as e:
+                logger.warning(f"PDF元数据提取失败: {e}")
+            
+            # 创建数据库记录
+            # 优先级：用户输入 > 提取的元数据 > 文件名
+            db_paper = Paper(
+                title=url_data.title or extracted_metadata.get("title") or original_filename,
+                authors=url_data.authors or extracted_metadata.get("authors"),
+                abstract=url_data.abstract or extracted_metadata.get("abstract"),
+                publication_date=url_data.publication_date or extracted_metadata.get("publication_date"),
+                keywords=url_data.keywords or extracted_metadata.get("keywords"),
+                doi=extracted_metadata.get("doi"),
+                file_path=file_path,
+                file_name=original_filename,
+                file_size=file_size,
+                source_url=url_data.url,
+                user_id=user_id
+            )
+            db.add(db_paper)
+            db.commit()
+            db.refresh(db_paper)
+            
+            # 附加提取的元数据到返回对象（供前端展示）
+            db_paper._extracted_metadata = extracted_metadata
+            
+            logger.info(f"从URL创建论文成功: {db_paper.id}, 标题: {db_paper.title}, 用户: {user_id}")
+            return db_paper
                 
         except httpx.HTTPStatusError as e:
             logger.error(f"下载文件失败: {e}")
@@ -211,6 +221,12 @@ class PaperService:
             logger.error(f"请求URL失败: {e}")
             raise HTTPException(status_code=400, detail=f"请求URL失败: {str(e)}")
         except Exception as e:
+            # 清理临时文件
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except:
+                    pass
             logger.error(f"创建论文失败: {e}")
             raise HTTPException(status_code=500, detail=f"创建论文失败: {str(e)}")
     

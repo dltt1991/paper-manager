@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Button, Tooltip, message, Spin, Input, Space, Modal, Radio } from 'antd';
+import { Button, Tooltip, message, Spin, Input, Space, Modal, Radio, Alert } from 'antd';
 import { 
   HighlightOutlined, 
   EditOutlined,
@@ -13,7 +13,7 @@ import {
   GlobalOutlined,
   CheckCircleOutlined
 } from '@ant-design/icons';
-import { annotationsApi, filesApi } from '../api';
+import { annotationsApi, filesApi, API_BASE_URL } from '../api';
 import apiClient from '../api';
 import type { Annotation, NativeAnnotation } from '../types';
 // Import react-pdf styles
@@ -186,11 +186,18 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   }, [currentPage, numPages, renderedPages]);
 
   // 构建PDF URL
+  // 优先使用后端API获取PDF（避免CORS问题），只有本地文件才直接使用filePath
   const pdfUrl = React.useMemo(() => {
-    if (url) return url;
-    if (filePath && paperId) {
-      const fullUrl = filesApi.getPdfUrl(filePath, paperId);
-      return fullUrl;
+    // 如果有paperId，优先使用后端API获取PDF（支持认证和避免CORS）
+    if (paperId) {
+      return `${API_BASE_URL}/papers/${paperId}/file`;
+    }
+    // 如果没有paperId，使用filePath或url
+    if (filePath) {
+      return filesApi.getPdfUrl(filePath);
+    }
+    if (url) {
+      return url;
     }
     return null;
   }, [url, filePath, paperId]);
@@ -208,14 +215,28 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
           responseType: 'blob',
         });
         
+        // 检查是否是有效的PDF（通过检查内容类型或大小）
+        const contentType = response.headers['content-type'];
+        if (contentType && contentType.includes('application/json')) {
+          // 可能是错误信息，尝试解析
+          const text = await response.data.text();
+          throw new Error(text || 'PDF文件不存在或正在导入中');
+        }
+        
+        // 检查blob大小
+        if (response.data.size < 100) {
+          throw new Error('PDF文件不存在或正在导入中，请稍后再试');
+        }
+        
         // 创建object URL
         const blob = new Blob([response.data], { type: 'application/pdf' });
         const objectUrl = URL.createObjectURL(blob);
         setPdfBlobUrl(objectUrl);
       } catch (error: any) {
         console.error('加载PDF失败:', error);
-        setError('PDF加载失败: ' + (error.message || '未知错误'));
-        message.error('PDF加载失败');
+        const errorMsg = error.response?.data?.detail || error.message || '未知错误';
+        setError('PDF加载失败: ' + errorMsg);
+        message.error('PDF加载失败: ' + errorMsg);
       } finally {
         setPdfLoading(false);
       }
@@ -952,6 +973,24 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     return (
       <div style={{ textAlign: 'center', padding: 50 }}>
         <Spin size="large" tip="加载PDF中..." />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{ textAlign: 'center', padding: 50 }}>
+        <Alert
+          message="PDF加载失败"
+          description={error}
+          type="error"
+          showIcon
+          action={
+            <Button size="small" type="primary" onClick={() => window.location.reload()}>
+              刷新页面
+            </Button>
+          }
+        />
       </div>
     );
   }

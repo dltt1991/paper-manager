@@ -40,4 +40,4 @@ echo "API 文档: http://$SERVER_IP:8000/docs"
 echo ""
 
 # 启动服务（绑定到 0.0.0.0 允许外部访问）
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload

@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
 from app.utils.logging_config import setup_logging
-from app.routers import papers, annotations, summarize, auth, admin, translate
+from app.routers import papers, annotations, summarize, auth, admin, translate, search
 
 # 设置日志
 logger = setup_logging()
@@ -38,6 +38,7 @@ app.include_router(annotations.router)
 app.include_router(summarize.router)
 app.include_router(admin.router)
 app.include_router(translate.router)
+app.include_router(search.router)
 
 
 @app.on_event("startup")

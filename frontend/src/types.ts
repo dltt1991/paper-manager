@@ -17,6 +17,7 @@ export interface Paper {
   created_at: string;
   updated_at: string;
   user_id?: number;
+  owner_username?: string;  // 全局搜索时返回的所有者用户名
   extracted_metadata?: {
     title?: string;
     authors?: string;
@@ -205,3 +206,38 @@ export interface UserApiConfigResponse {
   youdao_app_key_configured: boolean;
   youdao_app_secret_configured: boolean;
 }
+
+// ========== ArXiv 相关类型定义 ==========
+
+export interface ArxivPaper {
+  arxiv_id: string;
+  title: string;
+  authors: string;
+  abstract: string;
+  published: string;
+  updated?: string;
+  categories: string;
+  primary_category: string;
+  pdf_url: string;
+  arxiv_url: string;
+  doi?: string;
+  journal_ref?: string;
+  comment?: string;
+}
+
+export interface ArxivSearchResult {
+  total: number;
+  start: number;
+  items_per_page: number;
+  papers: ArxivPaper[];
+}
+
+export interface ArxivCategory {
+  code: string;
+  name: string;
+}
+
+// 统一搜索结果类型
+export type UnifiedSearchResult = 
+  | (Paper & { source: 'global' })
+  | (ArxivPaper & { source: 'arxiv' });

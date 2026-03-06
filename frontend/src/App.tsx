@@ -7,13 +7,15 @@ import {
   UserOutlined,
   SettingOutlined,
   LogoutOutlined,
-  DashboardOutlined
+  DashboardOutlined,
+  SearchOutlined
 } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import PaperList from './pages/PaperList';
 import PaperDetail from './pages/PaperDetail';
 import PaperEdit from './pages/PaperEdit';
+import PaperSearch from './pages/PaperSearch';
 import Login from './pages/Login';
 import Profile from './pages/Profile';
 import Admin from './pages/Admin';
@@ -126,6 +128,11 @@ const Navigation: React.FC = () => {
       icon: <BookOutlined />,
       label: <Link to="/">论文列表</Link>,
     },
+    {
+      key: '/search',
+      icon: <SearchOutlined />,
+      label: <Link to="/search">论文搜索</Link>,
+    },
   ];
 
   if (isAdmin) {
@@ -137,6 +144,7 @@ const Navigation: React.FC = () => {
   }
 
   const selectedKey = location.pathname === '/' ? '/' : 
+    location.pathname.startsWith('/search') ? '/search' :
     location.pathname.startsWith('/admin') ? '/admin' : '/';
 
   if (!isAuthenticated) {
@@ -248,6 +256,16 @@ const AppContent: React.FC = () => {
           <ProtectedRoute>
             <MainLayout>
               <Profile />
+            </MainLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/search"
+        element={
+          <ProtectedRoute>
+            <MainLayout>
+              <PaperSearch />
             </MainLayout>
           </ProtectedRoute>
         }

@@ -18,11 +18,13 @@ import type {
   UserListResponse,
   SystemStats,
   UserApiConfig,
-  UserApiConfigResponse
+  UserApiConfigResponse,
+  ArxivSearchResult,
+  ArxivPaper
 } from './types';
 
 // API基础URL
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 
                      (window.location.hostname === 'localhost' ? 'http://localhost:8000' : 
                       `http://${window.location.hostname}:8000`);
 
@@ -31,7 +33,7 @@ const apiClient: AxiosInstance = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
-  timeout: 60000,
+  timeout: 90000, // 增加到90秒，ArXiv搜索可能需要更长时间
 });
 
 // 请求拦截器 - 添加认证token
@@ -445,6 +447,107 @@ export const filesApi = {
     // 否则直接拼接路径
     const path = filePath.startsWith('/') ? filePath : `/${filePath}`;
     return `${API_BASE_URL}${path}`;
+  },
+};
+
+// ========== 搜索相关API ==========
+export const searchApi = {
+  // 全局搜索其他用户的论文
+  searchGlobal: async (query: string, params?: { skip?: number; limit?: number }): Promise<PaperListResponse> => {
+    const response = await apiClient.get('/search/global', {
+      params: { q: query, ...params }
+    });
+    return response.data;
+  },
+
+  // 获取所有其他用户的论文
+  getGlobalPapers: async (params?: { skip?: number; limit?: number }): Promise<PaperListResponse> => {
+    const response = await apiClient.get('/search/global/all', { params });
+    return response.data;
+  },
+
+  // 搜索 ArXiv 论文
+  searchArxiv: async (params: {
+    q: string;
+    start?: number;
+    max_results?: number;
+    sort_by?: 'relevance' | 'lastUpdatedDate' | 'submittedDate';
+    category?: string;
+  }): Promise<ArxivSearchResult> => {
+    const response = await apiClient.get('/search/arxiv', { params });
+    return response.data;
+  },
+
+  // 获取 ArXiv 分类列表
+  getArxivCategories: async (): Promise<{ categories: { code: string; name: string }[] }> => {
+    const response = await apiClient.get('/search/arxiv/categories');
+    return response.data;
+  },
+
+  // 获取 ArXiv 论文详情
+  getArxivPaper: async (arxivId: string): Promise<ArxivPaper> => {
+    const response = await apiClient.get(`/search/arxiv/${arxivId}`);
+    return response.data;
+  },
+
+  // 从 ArXiv 导入论文（异步模式）
+  importFromArxiv: async (arxivId: string): Promise<{ task_id: string; status: string; message: string; title: string }> => {
+    const response = await apiClient.post('/search/import/arxiv', null, {
+      params: { arxiv_id: arxivId },
+      timeout: 10000, // 10秒超时，只等待任务创建
+    });
+    return response.data;
+  },
+
+  // 从其他用户导入论文（异步模式）
+  importFromOtherUser: async (paperId: number): Promise<{ task_id: string; status: string; message: string; title: string }> => {
+    const response = await apiClient.post(`/search/import/paper/${paperId}`, null, {
+      timeout: 10000, // 10秒超时
+    });
+    return response.data;
+  },
+
+  // 从 URL 导入论文（异步模式）
+  importFromUrl: async (data: {
+    url: string;
+    title?: string;
+    authors?: string;
+    abstract?: string;
+    keywords?: string;
+    publication_date?: string;
+  }): Promise<{ task_id: string; status: string; message: string; title: string }> => {
+    const response = await apiClient.post('/search/import/url', data, {
+      timeout: 10000, // 10秒超时
+    });
+    return response.data;
+  },
+
+  // 获取导入任务状态
+  getImportStatus: async (taskId: string): Promise<{
+    task_id: string;
+    status: string;
+    progress: number;
+    message: string;
+    title: string;
+    paper_id?: number;
+    error?: string;
+  }> => {
+    const response = await apiClient.get(`/search/import/status/${taskId}`);
+    return response.data;
+  },
+
+  // 获取用户的导入任务列表
+  getImportTasks: async (): Promise<{ tasks: Array<{
+    task_id: string;
+    status: string;
+    progress: number;
+    title: string;
+    source_type: string;
+    paper_id?: number;
+    created_at: string;
+  }> }> => {
+    const response = await apiClient.get('/search/import/tasks');
+    return response.data;
   },
 };
 

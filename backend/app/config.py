@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     YOUDAO_APP_KEY: str = ""  # 应用ID
     YOUDAO_APP_SECRET: str = ""  # 应用密钥
     
+    # 代理配置（用于ArXiv下载）
+    # 格式: http://user:pass@host:port 或 http://host:port
+    HTTP_PROXY: str = ""  # HTTP代理
+    HTTPS_PROXY: str = ""  # HTTPS代理
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
