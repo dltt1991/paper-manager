@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Button, Tooltip, message, Spin, Input, Space, Modal, Radio, Alert } from 'antd';
+import { Button, Tooltip, message, Spin, Input, Space, Modal, Radio, Alert, InputNumber } from 'antd';
 import { 
   HighlightOutlined, 
   EditOutlined,
@@ -12,11 +12,20 @@ import {
   CloseOutlined,
   GlobalOutlined,
   CheckCircleOutlined,
-  SaveOutlined
+  SaveOutlined,
+  LeftOutlined,
+  RightOutlined,
+  BorderOutlined,
+  DeleteOutlined,
+  BorderOuterOutlined,
+  EditFilled,
+  ReloadOutlined,
+  DownloadOutlined,
+  PrinterOutlined
 } from '@ant-design/icons';
-import { annotationsApi, filesApi, API_BASE_URL } from '../api';
+import { annotationsApi, filesApi, paintStrokesApi, API_BASE_URL } from '../api';
 import apiClient from '../api';
-import type { Annotation, NativeAnnotation } from '../types';
+import type { Annotation, NativeAnnotation, PaintStrokeCreate } from '../types';
 // Import react-pdf styles
 import '/node_modules/react-pdf/dist/Page/AnnotationLayer.css';
 import '/node_modules/react-pdf/dist/Page/TextLayer.css';
@@ -75,7 +84,12 @@ interface ToolbarPosition {
   visible: boolean;
 }
 
-const PdfViewer: React.FC<PdfViewerProps> = ({
+// 定义 ref 暴露的方法
+export interface PdfViewerRef {
+  savePaintStrokes: () => Promise<void>;
+}
+
+const PdfViewer = React.forwardRef<PdfViewerRef, PdfViewerProps>(({
   paperId,
   filePath,
   url,
@@ -85,7 +99,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   onNativeAnnotationDelete,
   onNativeAnnotationUpdate,
   readOnly = false,
-}) => {
+}, ref) => {
   const [numPages, setNumPages] = useState<number>(0);
   const RENDER_SCALE = 2.0; // 固定渲染缩放，避免重新渲染
   const [displayScale, setDisplayScale] = useState<number>(1.2); // 显示缩放（CSS transform）
@@ -141,6 +155,46 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   const modalOpenRef = useRef<boolean>(false);
   // 标记是否正在执行工具栏操作（防止点击按钮时关闭工具框）
   const toolbarActionRef = useRef<boolean>(false);
+
+  // 画笔工具状态
+  const [penMode, setPenMode] = useState<'none' | 'rect' | 'ellipse' | 'free' | 'eraser'>('none');
+  const [penColor, setPenColor] = useState<string>('#ff0000');
+  const [penWidth] = useState<number>(2);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [penToolbarVisible, setPenToolbarVisible] = useState<boolean>(false);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const drawStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const currentPageRef = useRef<number>(1);
+  // 用于实时预览绘制（矩形/椭圆）
+  const snapshotRef = useRef<ImageData | null>(null);
+  
+  // 笔画存储 - 用于橡皮擦功能
+  type StrokeType = 'free' | 'rect' | 'ellipse';
+  interface Stroke {
+    id: string;
+    type: StrokeType;
+    color: string;
+    width: number;
+    points?: { x: number; y: number }[]; // 自由绘制
+    rect?: { x: number; y: number; width: number; height: number }; // 矩形
+    ellipse?: { x: number; y: number; radiusX: number; radiusY: number }; // 椭圆
+  }
+  const strokesRef = useRef<Map<number, Stroke[]>>(new Map());
+  const currentStrokeRef = useRef<Stroke | null>(null);
+  const eraserRadius = 15; // 橡皮擦检测半径
+
+  // 画笔颜色选项
+  const PEN_COLORS = [
+    { color: '#ff0000', name: '红色' },
+    { color: '#00ff00', name: '绿色' },
+    { color: '#0000ff', name: '蓝色' },
+    { color: '#000000', name: '黑色' },
+    { color: '#ffff00', name: '黄色' },
+    { color: '#ff00ff', name: '紫色' },
+    { color: '#00ffff', name: '青色' },
+    { color: '#ff6600', name: '橙色' },
+  ];
 
   // 全局去重 annotations（防止父组件传递重复数据）
   const dedupedAnnotations = useMemo(() => {
@@ -257,6 +311,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   useEffect(() => {
     if (paperId) {
       loadAnnotations();
+      loadPaintStrokes();
     }
   }, [paperId]);
 
@@ -529,6 +584,200 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     }
   };
 
+  // 加载画笔笔画
+  const loadPaintStrokes = async () => {
+    if (!paperId) return;
+    try {
+      const data = await paintStrokesApi.getStrokes(paperId);
+      const strokesByPage = data.strokes_by_page || {};
+      
+      console.log('[loadPaintStrokes] 后端返回数据:', data);
+      
+      // 清空现有笔画
+      strokesRef.current.clear();
+      
+      // 加载笔画数据
+      for (const [pageNumStr, strokes] of Object.entries(strokesByPage)) {
+        const pageNum = parseInt(pageNumStr);
+        const pageStrokes: Stroke[] = [];
+        
+        for (const stroke of strokes as any[]) {
+          // 后端返回的是 stroke_type，需要映射到 type
+          const strokeType = stroke.type || stroke.stroke_type;
+          
+          const newStroke: Stroke = {
+            id: String(stroke.id),
+            type: strokeType,
+            color: stroke.color,
+            width: stroke.width,
+          };
+          
+          console.log('[loadPaintStrokes] 加载笔画:', { id: stroke.id, type: strokeType, data: stroke.data });
+          
+          if (strokeType === 'free' && stroke.data?.points) {
+            newStroke.points = stroke.data.points;
+          } else if (strokeType === 'rect' && stroke.data?.rect) {
+            newStroke.rect = stroke.data.rect;
+          } else if (strokeType === 'ellipse' && stroke.data?.ellipse) {
+            newStroke.ellipse = stroke.data.ellipse;
+          }
+          
+          pageStrokes.push(newStroke);
+        }
+        
+        strokesRef.current.set(pageNum, pageStrokes);
+      }
+      
+      console.log(`[PdfViewer] 加载了 ${data.total} 个画笔笔画，页面:`, Array.from(strokesRef.current.keys()));
+      
+      // 延迟重绘，确保页面已经渲染
+      setTimeout(() => {
+        console.log('[loadPaintStrokes] 延迟重绘笔画...');
+        for (const pageNum of strokesRef.current.keys()) {
+          redrawStrokes(pageNum);
+        }
+      }, 500);
+    } catch (error: any) {
+      console.error('加载画笔笔画失败:', error);
+    }
+  };
+
+  // 保存画笔笔画到后端
+  const savePaintStrokes = async () => {
+    if (!paperId) {
+      console.warn('[savePaintStrokes] paperId is null');
+      return;
+    }
+    
+    try {
+      console.log(`[savePaintStrokes] 开始保存画笔笔画，paperId=${paperId}`);
+      console.log(`[savePaintStrokes] strokesRef.current.size = ${strokesRef.current.size}`);
+      console.log(`[savePaintStrokes] strokesRef.current.entries():`, Array.from(strokesRef.current.entries()));
+      
+      // 收集所有笔画
+      const allStrokes: PaintStrokeCreate[] = [];
+      for (const [pageNum, strokes] of strokesRef.current.entries()) {
+        console.log(`[savePaintStrokes] 页面 ${pageNum} 有 ${strokes.length} 个笔画`);
+        for (const stroke of strokes) {
+          console.log(`[savePaintStrokes] 处理笔画:`, stroke);
+          let strokeData: any = {};
+          if (stroke.type === 'free' && stroke.points) {
+            strokeData = { points: stroke.points };
+          } else if (stroke.type === 'rect' && stroke.rect) {
+            strokeData = { rect: stroke.rect };
+          } else if (stroke.type === 'ellipse' && stroke.ellipse) {
+            strokeData = { ellipse: stroke.ellipse };
+          }
+          
+          allStrokes.push({
+            page_number: pageNum,
+            stroke_type: stroke.type,
+            color: stroke.color,
+            width: stroke.width,
+            data: strokeData,
+          });
+        }
+      }
+      
+      console.log(`[savePaintStrokes] 共 ${allStrokes.length} 个笔画需要保存:`, allStrokes);
+      
+      // 先删除该论文的所有现有笔画
+      console.log('[savePaintStrokes] 删除现有笔画...');
+      const deleteResult = await paintStrokesApi.deleteAllStrokes(paperId);
+      console.log('[savePaintStrokes] 删除完成:', deleteResult);
+      
+      // 批量创建笔画
+      if (allStrokes.length > 0) {
+        console.log('[savePaintStrokes] 创建新笔画...');
+        const result = await paintStrokesApi.createStrokesBatch(paperId, allStrokes);
+        console.log(`[savePaintStrokes] 保存成功，创建了 ${result.created} 个笔画`);
+        message.success(`已保存 ${allStrokes.length} 个画笔笔画`);
+      } else {
+        console.log('[savePaintStrokes] 没有笔画需要保存');
+      }
+    } catch (error: any) {
+      console.error('[savePaintStrokes] 保存画笔笔画失败:', error);
+      console.error('[savePaintStrokes] 错误详情:', error.response?.data || error.message);
+      console.error('[savePaintStrokes] 错误堆栈:', error.stack);
+      message.error('保存画笔笔画失败: ' + (error.message || '未知错误'));
+    }
+  };
+  
+  // 组件卸载时保存 - 使用同步保存
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      console.log('[handleBeforeUnload] 页面即将关闭，保存画笔数据');
+      if (paperId && strokesRef.current.size > 0) {
+        const allStrokes: PaintStrokeCreate[] = [];
+        for (const [pageNum, strokes] of strokesRef.current.entries()) {
+          for (const stroke of strokes) {
+            let strokeData: any = {};
+            if (stroke.type === 'free' && stroke.points) {
+              strokeData = { points: stroke.points };
+            } else if (stroke.type === 'rect' && stroke.rect) {
+              strokeData = { rect: stroke.rect };
+            } else if (stroke.type === 'ellipse' && stroke.ellipse) {
+              strokeData = { ellipse: stroke.ellipse };
+            }
+            allStrokes.push({
+              page_number: pageNum,
+              stroke_type: stroke.type,
+              color: stroke.color,
+              width: stroke.width,
+              data: strokeData,
+            });
+          }
+        }
+        
+        if (allStrokes.length > 0) {
+          console.log('[handleBeforeUnload] 使用 Beacon API 发送数据');
+          const data = JSON.stringify(allStrokes);
+          const blob = new Blob([data], { type: 'application/json' });
+          navigator.sendBeacon(`${API_BASE_URL}/paint-strokes/papers/${paperId}/strokes/batch`, blob);
+        }
+      }
+    };
+
+    // 添加页面关闭事件监听
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    return () => {
+      console.log('[useEffect cleanup] 组件卸载，strokesRef大小:', strokesRef.current.size);
+      // 组件卸载时同步保存
+      handleBeforeUnload();
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [paperId]);
+  
+  // 暴露保存方法给父组件
+  React.useImperativeHandle(ref, () => ({
+    savePaintStrokes: () => {
+      console.log('[imperativeHandle] 外部调用保存');
+      return savePaintStrokes();
+    }
+  }));
+
+  // 处理PDF下载
+  const handleDownloadPdf = async () => {
+    try {
+      await filesApi.downloadPdf(paperId);
+      message.success('PDF下载成功');
+    } catch (error: any) {
+      console.error('下载PDF失败:', error);
+      message.error('下载PDF失败: ' + (error.message || '未知错误'));
+    }
+  };
+
+  // 处理PDF打印
+  const handlePrintPdf = async () => {
+    try {
+      await filesApi.printPdf(paperId);
+    } catch (error: any) {
+      console.error('打印PDF失败:', error);
+      message.error('打印PDF失败: ' + (error.message || '未知错误'));
+    }
+  };
+
   const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
     setNumPages(numPages);
     // 初始只渲染前3页
@@ -546,6 +795,30 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     message.error('PDF加载失败');
   };
 
+  // 跳转到指定页面
+  const handleGoToPage = (page: number) => {
+    const targetPage = Math.max(1, Math.min(page, numPages));
+    const pageEl = pageRefs.current.get(targetPage);
+    if (pageEl && containerRef.current) {
+      pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setCurrentPage(targetPage);
+    }
+  };
+
+  // 上一页
+  const handlePrevPage = () => {
+    if (currentPage > 1) {
+      handleGoToPage(currentPage - 1);
+    }
+  };
+
+  // 下一页
+  const handleNextPage = () => {
+    if (currentPage < numPages) {
+      handleGoToPage(currentPage + 1);
+    }
+  };
+
   // 缩放控制 - 只调整 displayScale，不重新渲染 PDF
   const handleZoomIn = () => {
     setDisplayScale(prev => Math.min(prev + 0.1, 3));
@@ -553,6 +826,425 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   
   const handleZoomOut = () => {
     setDisplayScale(prev => Math.max(prev - 0.1, 0.5));
+  };
+
+  // 获取或创建 canvas
+  const getOrCreateCanvas = (pageNum: number) => {
+    const pageEl = pageRefs.current.get(pageNum);
+    if (!pageEl) return null;
+    
+    let canvas = pageEl.querySelector(`canvas[data-pen-canvas="${pageNum}"]`) as HTMLCanvasElement;
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.setAttribute('data-pen-canvas', String(pageNum));
+      canvas.style.position = 'absolute';
+      canvas.style.top = '0';
+      canvas.style.left = '0';
+      canvas.style.pointerEvents = penMode !== 'none' ? 'auto' : 'none';
+      canvas.style.zIndex = '100';
+      canvas.width = 600 * RENDER_SCALE;
+      canvas.height = 800 * RENDER_SCALE;
+      pageEl.appendChild(canvas);
+      
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.scale(RENDER_SCALE, RENDER_SCALE);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+      }
+    }
+    // 更新 pointer-events 根据画笔模式
+    canvas.style.pointerEvents = penMode !== 'none' ? 'auto' : 'none';
+    return canvas;
+  };
+
+  // 绘制椭圆辅助函数
+  const drawEllipse = (ctx: CanvasRenderingContext2D, x: number, y: number, radiusX: number, radiusY: number) => {
+    ctx.beginPath();
+    ctx.ellipse(x, y, Math.abs(radiusX), Math.abs(radiusY), 0, 0, 2 * Math.PI);
+    ctx.stroke();
+  };
+
+  // 重绘指定页面的所有笔画
+  const redrawStrokes = (pageNum: number) => {
+    const canvas = getOrCreateCanvas(pageNum);
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    // 清除画布
+    ctx.clearRect(0, 0, canvas.width / RENDER_SCALE, canvas.height / RENDER_SCALE);
+    
+    // 获取该页面的所有笔画
+    const strokes = strokesRef.current.get(pageNum) || [];
+    
+    // 重绘所有笔画
+    for (const stroke of strokes) {
+      ctx.strokeStyle = stroke.color;
+      ctx.lineWidth = stroke.width;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      
+      if (stroke.type === 'free' && stroke.points && stroke.points.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
+        for (let i = 1; i < stroke.points.length; i++) {
+          ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+        }
+        ctx.stroke();
+      } else if (stroke.type === 'rect' && stroke.rect) {
+        ctx.strokeRect(stroke.rect.x, stroke.rect.y, stroke.rect.width, stroke.rect.height);
+      } else if (stroke.type === 'ellipse' && stroke.ellipse) {
+        drawEllipse(ctx, stroke.ellipse.x, stroke.ellipse.y, stroke.ellipse.radiusX, stroke.ellipse.radiusY);
+      }
+    }
+  };
+
+  // 检测点是否与笔画相交
+  const isPointNearStroke = (point: { x: number; y: number }, stroke: Stroke): boolean => {
+    if (stroke.type === 'free' && stroke.points) {
+      // 检测点是否靠近自由绘制线条的任何一段
+      for (let i = 0; i < stroke.points.length - 1; i++) {
+        const p1 = stroke.points[i];
+        const p2 = stroke.points[i + 1];
+        const dist = distanceFromPointToSegment(point, p1, p2);
+        if (dist < eraserRadius) return true;
+      }
+      // 也检测点是否靠近任何一个点
+      for (const p of stroke.points) {
+        const dist = Math.sqrt(Math.pow(point.x - p.x, 2) + Math.pow(point.y - p.y, 2));
+        if (dist < eraserRadius) return true;
+      }
+    } else if (stroke.type === 'rect' && stroke.rect) {
+      // 检测点是否靠近矩形边框
+      const r = stroke.rect;
+      const lines = [
+        { p1: { x: r.x, y: r.y }, p2: { x: r.x + r.width, y: r.y } },
+        { p1: { x: r.x + r.width, y: r.y }, p2: { x: r.x + r.width, y: r.y + r.height } },
+        { p1: { x: r.x + r.width, y: r.y + r.height }, p2: { x: r.x, y: r.y + r.height } },
+        { p1: { x: r.x, y: r.y + r.height }, p2: { x: r.x, y: r.y } },
+      ];
+      for (const line of lines) {
+        const dist = distanceFromPointToSegment(point, line.p1, line.p2);
+        if (dist < eraserRadius) return true;
+      }
+    } else if (stroke.type === 'ellipse' && stroke.ellipse) {
+      // 检测点是否靠近椭圆轮廓（近似为多个线段）
+      const e = stroke.ellipse;
+      const segments = 32;
+      for (let i = 0; i < segments; i++) {
+        const angle1 = (2 * Math.PI * i) / segments;
+        const angle2 = (2 * Math.PI * (i + 1)) / segments;
+        const p1 = {
+          x: e.x + e.radiusX * Math.cos(angle1),
+          y: e.y + e.radiusY * Math.sin(angle1),
+        };
+        const p2 = {
+          x: e.x + e.radiusX * Math.cos(angle2),
+          y: e.y + e.radiusY * Math.sin(angle2),
+        };
+        const dist = distanceFromPointToSegment(point, p1, p2);
+        if (dist < eraserRadius) return true;
+      }
+    }
+    return false;
+  };
+
+  // 计算点到线段的距离
+  const distanceFromPointToSegment = (
+    point: { x: number; y: number },
+    p1: { x: number; y: number },
+    p2: { x: number; y: number }
+  ): number => {
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 === 0) return Math.sqrt(Math.pow(point.x - p1.x, 2) + Math.pow(point.y - p1.y, 2));
+    let t = ((point.x - p1.x) * dx + (point.y - p1.y) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const projX = p1.x + t * dx;
+    const projY = p1.y + t * dy;
+    return Math.sqrt(Math.pow(point.x - projX, 2) + Math.pow(point.y - projY, 2));
+  };
+
+  // 开始绘制
+  const handleDrawStart = (e: React.MouseEvent, pageNum: number) => {
+    if (penMode === 'none' || readOnly) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const canvas = getOrCreateCanvas(pageNum);
+    if (!canvas) return;
+    
+    canvasRef.current = canvas;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    canvasCtxRef.current = ctx;
+    currentPageRef.current = pageNum;
+    
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX / RENDER_SCALE;
+    const y = (e.clientY - rect.top) * scaleY / RENDER_SCALE;
+    
+    drawStartPosRef.current = { x, y };
+    setIsDrawing(true);
+    
+    if (penMode === 'free') {
+      // 创建新笔画
+      currentStrokeRef.current = {
+        id: Date.now().toString(),
+        type: 'free',
+        color: penColor,
+        width: penWidth,
+        points: [{ x, y }],
+      };
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.strokeStyle = penColor;
+      ctx.lineWidth = penWidth;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+    } else if (penMode === 'eraser') {
+      // 橡皮擦模式：检测并删除相交的笔画
+      const strokes = strokesRef.current.get(pageNum) || [];
+      const point = { x, y };
+      const remainingStrokes = strokes.filter(s => !isPointNearStroke(point, s));
+      if (remainingStrokes.length < strokes.length) {
+        strokesRef.current.set(pageNum, remainingStrokes);
+        redrawStrokes(pageNum);
+      }
+    } else if (penMode === 'rect' || penMode === 'ellipse') {
+      // 保存当前画布状态用于预览
+      snapshotRef.current = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = penColor;
+      ctx.lineWidth = penWidth;
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  };
+
+  // 绘制中
+  const handleDrawMove = (e: React.MouseEvent) => {
+    if (!isDrawing || !canvasCtxRef.current || !canvasRef.current || !drawStartPosRef.current) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const canvas = canvasRef.current;
+    const ctx = canvasCtxRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX / RENDER_SCALE;
+    const y = (e.clientY - rect.top) * scaleY / RENDER_SCALE;
+    
+    if (penMode === 'free') {
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      // 记录点
+      if (currentStrokeRef.current) {
+        currentStrokeRef.current.points!.push({ x, y });
+      }
+    } else if (penMode === 'eraser') {
+      // 橡皮擦模式：检测并删除相交的笔画
+      const pageNum = currentPageRef.current;
+      const strokes = strokesRef.current.get(pageNum) || [];
+      const point = { x, y };
+      const remainingStrokes = strokes.filter(s => !isPointNearStroke(point, s));
+      if (remainingStrokes.length < strokes.length) {
+        strokesRef.current.set(pageNum, remainingStrokes);
+        redrawStrokes(pageNum);
+      }
+    } else if (penMode === 'rect' || penMode === 'ellipse') {
+      // 恢复画布状态并绘制预览
+      if (snapshotRef.current) {
+        ctx.putImageData(snapshotRef.current, 0, 0);
+      }
+      ctx.strokeStyle = penColor;
+      ctx.lineWidth = penWidth;
+      ctx.globalCompositeOperation = 'source-over';
+      
+      const startX = drawStartPosRef.current.x;
+      const startY = drawStartPosRef.current.y;
+      
+      if (penMode === 'rect') {
+        ctx.strokeRect(startX, startY, x - startX, y - startY);
+      } else if (penMode === 'ellipse') {
+        const radiusX = (x - startX) / 2;
+        const radiusY = (y - startY) / 2;
+        const centerX = startX + radiusX;
+        const centerY = startY + radiusY;
+        drawEllipse(ctx, centerX, centerY, radiusX, radiusY);
+      }
+    }
+  };
+
+  // 结束绘制
+  const handleDrawEnd = (e: React.MouseEvent) => {
+    if (!isDrawing || !canvasCtxRef.current || !drawStartPosRef.current) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const canvas = canvasRef.current;
+    const ctx = canvasCtxRef.current;
+    const rect = canvas!.getBoundingClientRect();
+    const scaleX = canvas!.width / rect.width;
+    const scaleY = canvas!.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX / RENDER_SCALE;
+    const y = (e.clientY - rect.top) * scaleY / RENDER_SCALE;
+    
+    const pageNum = currentPageRef.current;
+    
+    if (penMode === 'free') {
+      // 保存自由绘制笔画
+      if (currentStrokeRef.current && currentStrokeRef.current.points!.length > 1) {
+        const strokes = strokesRef.current.get(pageNum) || [];
+        strokes.push(currentStrokeRef.current);
+        strokesRef.current.set(pageNum, strokes);
+        console.log('[handleDrawEnd] 自由绘制笔画已保存，页面:', pageNum, '笔画数:', strokes.length);
+      } else {
+        console.log('[handleDrawEnd] 自由绘制笔画未保存，点数不足:', currentStrokeRef.current?.points?.length);
+      }
+      currentStrokeRef.current = null;
+    } else if (penMode === 'rect') {
+      const width = x - drawStartPosRef.current.x;
+      const height = y - drawStartPosRef.current.y;
+      // 只保存有效的矩形
+      if (Math.abs(width) > 2 && Math.abs(height) > 2) {
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = penColor;
+        ctx.lineWidth = penWidth;
+        ctx.strokeRect(
+          drawStartPosRef.current.x,
+          drawStartPosRef.current.y,
+          width,
+          height
+        );
+        // 保存矩形笔画
+        const strokes = strokesRef.current.get(pageNum) || [];
+        strokes.push({
+          id: Date.now().toString(),
+          type: 'rect',
+          color: penColor,
+          width: penWidth,
+          rect: {
+            x: drawStartPosRef.current.x,
+            y: drawStartPosRef.current.y,
+            width,
+            height,
+          },
+        });
+        strokesRef.current.set(pageNum, strokes);
+        console.log('[handleDrawEnd] 矩形笔画已保存，页面:', pageNum, '笔画数:', strokes.length);
+      } else {
+        console.log('[handleDrawEnd] 矩形笔画未保存，尺寸太小');
+      }
+    } else if (penMode === 'ellipse') {
+      const radiusX = (x - drawStartPosRef.current.x) / 2;
+      const radiusY = (y - drawStartPosRef.current.y) / 2;
+      // 只保存有效的椭圆
+      if (Math.abs(radiusX) > 2 && Math.abs(radiusY) > 2) {
+        const centerX = drawStartPosRef.current.x + radiusX;
+        const centerY = drawStartPosRef.current.y + radiusY;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.strokeStyle = penColor;
+        ctx.lineWidth = penWidth;
+        drawEllipse(ctx, centerX, centerY, radiusX, radiusY);
+        // 保存椭圆笔画
+        const strokes = strokesRef.current.get(pageNum) || [];
+        strokes.push({
+          id: Date.now().toString(),
+          type: 'ellipse',
+          color: penColor,
+          width: penWidth,
+          ellipse: {
+            x: centerX,
+            y: centerY,
+            radiusX: Math.abs(radiusX),
+            radiusY: Math.abs(radiusY),
+          },
+        });
+        strokesRef.current.set(pageNum, strokes);
+        console.log('[handleDrawEnd] 椭圆笔画已保存，页面:', pageNum, '笔画数:', strokes.length);
+      } else {
+        console.log('[handleDrawEnd] 椭圆笔画未保存，半径太小');
+      }
+    }
+    
+    snapshotRef.current = null;
+    setIsDrawing(false);
+    drawStartPosRef.current = null;
+    
+    // 立即保存
+    console.log('[handleDrawEnd] 触发立即保存');
+    savePaintStrokes();
+  };
+
+  // 清除当前页面画笔
+  const handleClearPen = async () => {
+    const pageNum = currentPageRef.current;
+    // 清除笔画记录
+    strokesRef.current.set(pageNum, []);
+    // 重绘（清空画布）
+    redrawStrokes(pageNum);
+    
+    // 同步到后端
+    if (paperId) {
+      try {
+        await paintStrokesApi.deleteStrokesByPage(paperId, pageNum);
+      } catch (error) {
+        console.error('删除后端笔画失败:', error);
+      }
+    }
+    
+    message.success('已清除当前页画笔内容');
+  };
+
+  // 清除所有页面的画笔
+  const handleClearAllPen = () => {
+    Modal.confirm({
+      title: '确认清除',
+      icon: <ExclamationCircleOutlined />,
+      content: '确定要清除所有页面的画笔内容吗？此操作不可恢复。',
+      okText: '确认清除',
+      okType: 'danger',
+      cancelText: '取消',
+      onOk: async () => {
+        // 清除所有笔画记录
+        strokesRef.current.clear();
+        // 清除所有画布
+        pageRefs.current.forEach((_, pageNum) => {
+          const canvas = getOrCreateCanvas(pageNum);
+          if (canvas) {
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+          }
+        });
+        
+        // 同步到后端
+        if (paperId) {
+          try {
+            await paintStrokesApi.deleteAllStrokes(paperId);
+          } catch (error) {
+            console.error('删除后端笔画失败:', error);
+          }
+        }
+        
+        message.success('已清除所有页面画笔内容');
+      },
+    });
   };
 
   // 隐藏工具框
@@ -1104,10 +1796,6 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       }}>
         {!readOnly && (
           <Space>
-            <span style={{ color: '#666', fontSize: 14 }}>
-              选中文本后自动显示操作工具框
-            </span>
-            
             {/* 清除按钮组 */}
             <Tooltip title="清除所有高亮">
               <Button
@@ -1141,7 +1829,47 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
         </Space>
 
         <Space>
-          <span>共 {numPages} 页</span>
+          {/* PDF下载按钮 */}
+          <Tooltip title="下载PDF">
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={handleDownloadPdf}
+              size="small"
+            />
+          </Tooltip>
+          
+          {/* PDF打印按钮 */}
+          <Tooltip title="打印PDF">
+            <Button
+              icon={<PrinterOutlined />}
+              onClick={handlePrintPdf}
+              size="small"
+            />
+          </Tooltip>
+          
+          <Button 
+            icon={<LeftOutlined />} 
+            onClick={handlePrevPage}
+            disabled={currentPage <= 1}
+            size="small"
+          />
+          <InputNumber
+            min={1}
+            max={numPages}
+            value={currentPage}
+            onChange={(value) => {
+              if (value) handleGoToPage(value);
+            }}
+            style={{ width: 60 }}
+            size="small"
+          />
+          <span style={{ color: '#666' }}>/ {numPages}</span>
+          <Button 
+            icon={<RightOutlined />} 
+            onClick={handleNextPage}
+            disabled={currentPage >= numPages}
+            size="small"
+          />
         </Space>
       </div>
 
@@ -1178,18 +1906,21 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                     position: 'relative',
                     boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
                     backgroundColor: 'white',
+                    // 根据缩放调整高度，避免 transform 导致的布局留白
+                    height: 800 * displayScale + 40, // 40px 是页码提示的间距
                   }}
                 >
-                  {/* 页码提示 */}
+                  {/* 页码提示 - 显示在页面内部上方，避免被遮挡 */}
                   <div style={{
                     position: 'absolute',
-                    top: -25,
+                    top: 8,
                     left: 0,
                     right: 0,
                     textAlign: 'center',
-                    color: '#fff',
-                    fontSize: 12,
-                    opacity: 0.8,
+                    color: '#666',
+                    fontSize: 11,
+                    zIndex: 5,
+                    textShadow: '0 0 2px rgba(255,255,255,0.8)',
                   }}>
                     第 {pageNum} / {numPages} 页
                   </div>
@@ -1203,12 +1934,19 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                     ref={el => {
                       if (el) pageRefs.current.set(pageNum, el);
                     }}
+                    onMouseDown={(e) => handleDrawStart(e, pageNum)}
+                    onMouseMove={handleDrawMove}
+                    onMouseUp={handleDrawEnd}
+                    onMouseLeave={handleDrawEnd}
                     style={{
                       transform: `scale(${displayScale / RENDER_SCALE})`,
                       transformOrigin: 'top center',
                       width: 600 * RENDER_SCALE,
-                      height: renderPageRange.has(pageNum) ? undefined : 800 * RENDER_SCALE,
+                      // 关键：高度设为缩放后的值，避免 CSS transform 导致的布局留白
+                      height: 800 * displayScale,
                       position: 'relative',
+                      overflow: 'visible',
+                      cursor: penMode !== 'none' ? (penMode === 'eraser' ? 'cell' : 'crosshair') : 'default',
                     }}
                   >
                     {renderPageRange.has(pageNum) ? (
@@ -1225,6 +1963,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                         onRenderSuccess={() => {
                           // 页面渲染成功后加入缓存
                           setRenderedPages(prev => new Set(prev).add(pageNum));
+                          // 重绘该页面的笔画
+                          setTimeout(() => {
+                            redrawStrokes(pageNum);
+                          }, 100);
                         }}
                       />
                     ) : (
@@ -1247,6 +1989,213 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
               ))}
             </div>
           </Document>
+        )}
+        
+        {/* 右下角画笔工具栏容器 */}
+        {!readOnly && (
+          <div style={{
+            position: 'fixed',
+            bottom: 20,
+            right: 20,
+            zIndex: 1000,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}>
+            {/* 画笔工具栏 - 从右向左弹出 */}
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '6px 12px',
+              backgroundColor: 'rgba(255, 255, 255, 0.95)',
+              borderRadius: 20,
+              boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
+              border: '1px solid #e8e8e8',
+              opacity: penToolbarVisible ? 1 : 0,
+              transform: penToolbarVisible ? 'translateX(0)' : 'translateX(20px)',
+              visibility: penToolbarVisible ? 'visible' : 'hidden',
+              transition: 'all 0.3s ease',
+              overflow: 'hidden',
+              whiteSpace: 'nowrap',
+            }}>
+              {/* 矩形按钮 */}
+              <Tooltip title="矩形框">
+                <Button
+                  type={penMode === 'rect' ? 'primary' : 'default'}
+                  size="small"
+                  icon={<BorderOutlined />}
+                  onClick={() => setPenMode(penMode === 'rect' ? 'none' : 'rect')}
+                  style={{ 
+                    padding: 0, 
+                    width: 28, 
+                    height: 28,
+                    minWidth: 28,
+                  }}
+                />
+              </Tooltip>
+              
+              {/* 椭圆按钮 */}
+              <Tooltip title="椭圆">
+                <Button
+                  type={penMode === 'ellipse' ? 'primary' : 'default'}
+                  size="small"
+                  icon={<BorderOuterOutlined />}
+                  onClick={() => setPenMode(penMode === 'ellipse' ? 'none' : 'ellipse')}
+                  style={{ 
+                    padding: 0, 
+                    width: 28, 
+                    height: 28,
+                    minWidth: 28,
+                  }}
+                />
+              </Tooltip>
+              
+              {/* 自由绘制按钮 */}
+              <Tooltip title="自由绘制">
+                <Button
+                  type={penMode === 'free' ? 'primary' : 'default'}
+                  size="small"
+                  icon={<EditFilled />}
+                  onClick={() => setPenMode(penMode === 'free' ? 'none' : 'free')}
+                  style={{ 
+                    padding: 0, 
+                    width: 28, 
+                    height: 28,
+                    minWidth: 28,
+                  }}
+                />
+              </Tooltip>
+              
+              {/* 橡皮擦按钮 - 使用自定义橡皮擦图标 */}
+              <Tooltip title="橡皮擦">
+                <Button
+                  type={penMode === 'eraser' ? 'primary' : 'default'}
+                  size="small"
+                  onClick={() => setPenMode(penMode === 'eraser' ? 'none' : 'eraser')}
+                  style={{ 
+                    padding: 0, 
+                    width: 28, 
+                    height: 28,
+                    minWidth: 28,
+                  }}
+                >
+                  <div style={{
+                    width: 14,
+                    height: 10,
+                    backgroundColor: penMode === 'eraser' ? '#fff' : '#666',
+                    borderRadius: 2,
+                    position: 'relative',
+                  }}>
+                    {/* 橡皮擦条纹 */}
+                    <div style={{
+                      position: 'absolute',
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      height: 4,
+                      backgroundColor: penMode === 'eraser' ? '#1890ff' : '#999',
+                      borderRadius: '0 0 2px 2px',
+                    }} />
+                  </div>
+                </Button>
+              </Tooltip>
+              
+              {/* 分隔线 */}
+              <div style={{ width: 1, height: 20, backgroundColor: '#e8e8e8', margin: '0 2px' }} />
+              
+              {/* 颜色选择器 */}
+              <div style={{ display: 'flex', gap: 3, alignItems: 'center' }}>
+                {PEN_COLORS.map(({ color, name }) => (
+                  <Tooltip key={color} title={name}>
+                    <div
+                      onClick={() => setPenColor(color)}
+                      style={{
+                        width: 16,
+                        height: 16,
+                        backgroundColor: color,
+                        borderRadius: 3,
+                        cursor: 'pointer',
+                        border: penColor === color ? '2px solid #333' : '2px solid transparent',
+                        boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                      }}
+                    />
+                  </Tooltip>
+                ))}
+              </div>
+              
+              {/* 分隔线 */}
+              <div style={{ width: 1, height: 20, backgroundColor: '#e8e8e8', margin: '0 2px' }} />
+              
+              {/* 清除按钮 */}
+              <Tooltip title="清除当前页">
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={handleClearPen}
+                  style={{ 
+                    padding: 0, 
+                    width: 28, 
+                    height: 28,
+                    minWidth: 28,
+                  }}
+                />
+              </Tooltip>
+              <Tooltip title="清除所有页">
+                <Button
+                  size="small"
+                  danger
+                  icon={<DeleteOutlined />}
+                  onClick={handleClearAllPen}
+                  style={{ 
+                    padding: 0, 
+                    width: 28, 
+                    height: 28,
+                    minWidth: 28,
+                  }}
+                />
+              </Tooltip>
+              
+              {/* 关闭画笔模式按钮 */}
+              {penMode !== 'none' && (
+                <Tooltip title="退出画笔模式">
+                  <Button
+                    size="small"
+                    type="text"
+                    icon={<CloseOutlined />}
+                    onClick={() => setPenMode('none')}
+                    style={{ 
+                      padding: 0, 
+                      width: 28, 
+                      height: 28,
+                      minWidth: 28,
+                      color: '#ff4d4f' 
+                    }}
+                  />
+                </Tooltip>
+              )}
+            </div>
+            
+            {/* 显示/隐藏画笔按钮 - 固定在右下角 */}
+            <Tooltip title={penToolbarVisible ? '隐藏画笔' : '显示画笔'}>
+              <Button
+                type="primary"
+                size="small"
+                icon={<EditFilled />}
+                onClick={() => setPenToolbarVisible(!penToolbarVisible)}
+                style={{
+                  width: 36,
+                  height: 36,
+                  borderRadius: '50%',
+                  boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+                  padding: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              />
+            </Tooltip>
+          </div>
         )}
       </div>
 
@@ -1704,7 +2653,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       )}
     </div>
   );
-};
+});
 
 // 优化的 Page 组件 - 使用 memo 避免不必要的重渲染
 const MemoizedPage = React.memo<{

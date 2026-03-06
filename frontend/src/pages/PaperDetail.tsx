@@ -28,7 +28,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { papersApi, annotationsApi } from '../api';
-import PdfViewer from '../components/PdfViewer';
+import PdfViewer, { type PdfViewerRef } from '../components/PdfViewer';
 import AISummary from '../components/AISummary';
 import type { Paper, Annotation, NativeAnnotation } from '../types';
 
@@ -68,12 +68,23 @@ const PaperDetail: React.FC = () => {
   const [isResizing, setIsResizing] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState<boolean>(getSavedSidebarHidden());
   const containerRef = useRef<HTMLDivElement>(null);
+  const pdfViewerRef = useRef<PdfViewerRef>(null);
 
   useEffect(() => {
     if (id) {
       fetchPaperDetail();
     }
   }, [id]);
+  
+  // 组件卸载时保存画笔内容
+  useEffect(() => {
+    return () => {
+      console.log('[PaperDetail cleanup] 组件卸载，保存画笔内容');
+      if (pdfViewerRef.current) {
+        pdfViewerRef.current.savePaintStrokes();
+      }
+    };
+  }, []);
 
   // 监听全屏变化事件
   useEffect(() => {
@@ -479,6 +490,7 @@ const PaperDetail: React.FC = () => {
             >
               {hasPdf ? (
                 <PdfViewer
+                  ref={pdfViewerRef}
                   paperId={paper.id}
                   filePath={paper.file_path}
                   url={paper.url}

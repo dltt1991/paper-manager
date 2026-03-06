@@ -20,7 +20,9 @@ import type {
   UserApiConfig,
   UserApiConfigResponse,
   ArxivSearchResult,
-  ArxivPaper
+  ArxivPaper,
+  PaintStroke,
+  PaintStrokeCreate
 } from './types';
 
 // API基础URL
@@ -375,6 +377,67 @@ export const annotationsApi = {
   },
 };
 
+// ========== 画笔笔画相关API ==========
+export const paintStrokesApi = {
+  // 获取论文的所有画笔笔画（按页面分组）
+  // 后端返回的笔画字段是 stroke_type 而不是 type
+  getStrokes: async (paperId: number): Promise<{ strokes_by_page: Record<number, Array<{
+    id: number;
+    stroke_type: 'free' | 'rect' | 'ellipse';
+    color: string;
+    width: number;
+    data: any;
+  }>>; total: number }> => {
+    const response = await apiClient.get(`/paint-strokes/papers/${paperId}/strokes`);
+    return response.data;
+  },
+
+  // 获取指定页面的画笔笔画
+  getStrokesByPage: async (paperId: number, pageNumber: number): Promise<{ strokes_by_page: Record<number, Array<{
+    id: number;
+    stroke_type: 'free' | 'rect' | 'ellipse';
+    color: string;
+    width: number;
+    data: any;
+  }>>; total: number }> => {
+    const response = await apiClient.get(`/paint-strokes/papers/${paperId}/strokes`, {
+      params: { page_number: pageNumber }
+    });
+    return response.data;
+  },
+
+  // 创建单个笔画
+  createStroke: async (paperId: number, stroke: PaintStrokeCreate): Promise<PaintStroke> => {
+    const response = await apiClient.post(`/paint-strokes/papers/${paperId}/strokes`, stroke);
+    return response.data;
+  },
+
+  // 批量创建笔画
+  createStrokesBatch: async (paperId: number, strokes: PaintStrokeCreate[]): Promise<{ created: number }> => {
+    const response = await apiClient.post(`/paint-strokes/papers/${paperId}/strokes/batch`, strokes);
+    return response.data;
+  },
+
+  // 删除单个笔画
+  deleteStroke: async (paperId: number, strokeId: number): Promise<void> => {
+    await apiClient.delete(`/paint-strokes/papers/${paperId}/strokes/${strokeId}`);
+  },
+
+  // 删除指定页面的所有笔画
+  deleteStrokesByPage: async (paperId: number, pageNumber: number): Promise<{ deleted: number }> => {
+    const response = await apiClient.delete(`/paint-strokes/papers/${paperId}/strokes`, {
+      params: { page_number: pageNumber }
+    });
+    return response.data;
+  },
+
+  // 删除论文的所有笔画
+  deleteAllStrokes: async (paperId: number): Promise<{ deleted: number }> => {
+    const response = await apiClient.delete(`/paint-strokes/papers/${paperId}/strokes`);
+    return response.data;
+  },
+};
+
 // ========== 管理员API ==========
 export const adminApi = {
   // 获取用户列表
@@ -447,6 +510,47 @@ export const filesApi = {
     // 否则直接拼接路径
     const path = filePath.startsWith('/') ? filePath : `/${filePath}`;
     return `${API_BASE_URL}${path}`;
+  },
+
+  // 下载PDF文件
+  downloadPdf: async (paperId: number, filename?: string): Promise<void> => {
+    const response = await apiClient.get(`${API_BASE_URL}/papers/${paperId}/file`, {
+      responseType: 'blob',
+    });
+    
+    // 创建下载链接
+    const blob = new Blob([response.data], { type: 'application/pdf' });
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename || `paper_${paperId}.pdf`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  },
+
+  // 打印PDF文件（在新窗口打开并触发打印）
+  printPdf: async (paperId: number): Promise<void> => {
+    const response = await apiClient.get(`${API_BASE_URL}/papers/${paperId}/file`, {
+      responseType: 'blob',
+    });
+    
+    const blob = new Blob([response.data], { type: 'application/pdf' });
+    const url = window.URL.createObjectURL(blob);
+    
+    // 在新窗口打开PDF并触发打印
+    const printWindow = window.open(url, '_blank');
+    if (printWindow) {
+      printWindow.addEventListener('load', () => {
+        printWindow.print();
+      });
+    }
+    
+    // 清理URL对象（延迟执行，确保打印完成）
+    setTimeout(() => {
+      window.URL.revokeObjectURL(url);
+    }, 60000);
   },
 };
 

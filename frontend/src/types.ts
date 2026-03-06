@@ -241,3 +241,29 @@ export interface ArxivCategory {
 export type UnifiedSearchResult = 
   | (Paper & { source: 'global' })
   | (ArxivPaper & { source: 'arxiv' });
+
+// ========== 画笔笔画类型定义 ==========
+
+export interface PaintStroke {
+  id: number;
+  type: 'free' | 'rect' | 'ellipse';
+  color: string;
+  width: number;
+  data: {
+    points?: Array<{ x: number; y: number }>;
+    rect?: { x: number; y: number; width: number; height: number };
+    ellipse?: { x: number; y: number; radiusX: number; radiusY: number };
+  };
+}
+
+export interface PaintStrokeCreate {
+  page_number: number;
+  stroke_type: 'free' | 'rect' | 'ellipse';
+  color: string;
+  width: number;
+  data: {
+    points?: Array<{ x: number; y: number }>;
+    rect?: { x: number; y: number; width: number; height: number };
+    ellipse?: { x: number; y: number; radiusX: number; radiusY: number };
+  };
+}

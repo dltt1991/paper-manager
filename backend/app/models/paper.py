@@ -31,6 +31,7 @@ class Paper(Base):
     # 关联关系
     owner = relationship("User", back_populates="papers")
     annotations = relationship("Annotation", back_populates="paper", cascade="all, delete-orphan")
+    paint_strokes = relationship("PaintStroke", back_populates="paper", cascade="all, delete-orphan")
     
     def __repr__(self):
         return f"<Paper(id={self.id}, title={self.title}, user_id={self.user_id})"
