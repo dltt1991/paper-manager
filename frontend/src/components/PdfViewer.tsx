@@ -11,7 +11,8 @@ import {
   ExclamationCircleOutlined,
   CloseOutlined,
   GlobalOutlined,
-  CheckCircleOutlined
+  CheckCircleOutlined,
+  SaveOutlined
 } from '@ant-design/icons';
 import { annotationsApi, filesApi, API_BASE_URL } from '../api';
 import apiClient from '../api';
@@ -312,34 +313,51 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
           // 需要转换回渲染坐标：视觉坐标 / displayScale = 相对于渲染页面的坐标
           const pageRect = pageEl.getBoundingClientRect();
           const clientRects = range.getClientRects();
-          const rects: TextSelectionInfo['rects'] = [];
-
+          // PDF.js 每个单词一个 span，需要合并同一行的 rects
+          const lineMap = new Map<number, DOMRect[]>();
+          
+          // 按行分组（y 坐标接近的视为同一行）
+          const lineThreshold = 5; // 5px 容差
           for (let i = 0; i < clientRects.length; i++) {
             const rect = clientRects[i];
-            // 确保矩形在页面范围内
             if (rect.width > 0 && rect.height > 0) {
-              // 视觉坐标差值 / displayScale = 渲染坐标系中的相对位置
-              const newRect = {
-                left: (rect.left - pageRect.left) / displayScale,
-                top: (rect.top - pageRect.top) / displayScale,
-                width: rect.width / displayScale,
-                height: rect.height / displayScale,
-              };
-              
-              // 检查是否已存在相同位置的矩形（去重）
-              const threshold = Math.max(0.1, 0.5 / RENDER_SCALE);
-              const isDuplicate = rects.some(r => 
-                Math.abs(r.left - newRect.left) < threshold && 
-                Math.abs(r.top - newRect.top) < threshold &&
-                Math.abs(r.width - newRect.width) < threshold &&
-                Math.abs(r.height - newRect.height) < threshold
-              );
-              
-              if (!isDuplicate) {
-                rects.push(newRect);
+              // 找是否已有接近的行
+              let foundLine = false;
+              for (const [key, lineRects] of lineMap) {
+                if (Math.abs(key - rect.top) < lineThreshold) {
+                  lineRects.push(rect);
+                  foundLine = true;
+                  break;
+                }
+              }
+              if (!foundLine) {
+                lineMap.set(rect.top, [rect]);
               }
             }
           }
+          
+          // 合并每行的 rects
+          const rects: TextSelectionInfo['rects'] = [];
+          for (const lineRects of lineMap.values()) {
+            if (lineRects.length === 0) continue;
+            // 按 left 排序
+            lineRects.sort((a, b) => a.left - b.left);
+            // 合并成一行
+            const minLeft = Math.min(...lineRects.map(r => r.left));
+            const maxRight = Math.max(...lineRects.map(r => r.left + r.width));
+            const top = lineRects[0].top;
+            const height = Math.max(...lineRects.map(r => r.height));
+            
+            rects.push({
+              left: (minLeft - pageRect.left) / displayScale,
+              top: (top - pageRect.top) / displayScale,
+              width: (maxRight - minLeft) / displayScale,
+              height: height / displayScale,
+            });
+          }
+          
+          // 按 top 排序，确保从上到下
+          rects.sort((a, b) => a.top - b.top);
 
           if (rects.length === 0) {
             setTextSelection(null);
@@ -553,21 +571,17 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     hideToolbar();
 
     try {
-      // 对 rects 进行去重，防止同一位置创建多个 annotation
-      const uniqueRects = textSelection.rects.filter((rect, index, self) =>
-        index === self.findIndex(r => 
-          Math.abs(r.left - rect.left) < 0.1 && 
-          Math.abs(r.top - rect.top) < 0.1 &&
-          Math.abs(r.width - rect.width) < 0.1 &&
-          Math.abs(r.height - rect.height) < 0.1
-        )
-      );
+      // rects 已经是每行一个矩形（range.getClientRects() 返回每行的包围盒）
+      // 只需简单去重防止重复创建
+      const lineRects = textSelection.rects;
+      if (lineRects.length === 0) {
+        message.error('没有选中的文本');
+        return;
+      }
       
-      console.log(`[Create Highlight] 原始行数: ${textSelection.rects.length}, 去重后: ${uniqueRects.length}`);
-      
+      // 为每一行创建一个高亮
       const newAnnotations: Annotation[] = [];
-      
-      for (const rect of uniqueRects) {
+      for (const rect of lineRects) {
         const newAnnotation = await annotationsApi.createAnnotation(paperId, {
           page_number: textSelection.pageNum,
           type: 'highlight',
@@ -581,7 +595,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
         newAnnotations.push(newAnnotation);
       }
 
-      // 合并新 annotation 并去重（防止重复添加）
+      // 合并新 annotation
       const combined = [...dedupedAnnotations, ...newAnnotations];
       const uniqueMap = new Map<number, Annotation>();
       combined.forEach(a => {
@@ -591,7 +605,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       });
       onAnnotationsChange(Array.from(uniqueMap.values()));
       
-      message.success(`高亮添加成功 (${newAnnotations.length} 处)`);
+      message.success(`高亮添加成功 (${newAnnotations.length} 行)`);
       
       // 清除选择
       setTextSelection(null);
@@ -632,36 +646,30 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     setCommentLoading(true);
 
     try {
-      // 对 rects 进行去重，防止同一位置创建多个 annotation
-      const uniqueRects = selection.rects.filter((rect, index, self) =>
-        index === self.findIndex(r => 
-          Math.abs(r.left - rect.left) < 0.1 && 
-          Math.abs(r.top - rect.top) < 0.1 &&
-          Math.abs(r.width - rect.width) < 0.1 &&
-          Math.abs(r.height - rect.height) < 0.1
-        )
-      );
+      // rects 已经是每行一个矩形（range.getClientRects() 返回每行的包围盒）
+      const lineRects = selection.rects;
+      if (lineRects.length === 0) {
+        message.error('没有选中的文本');
+        return;
+      }
       
-      console.log(`[Create Comment] 原始行数: ${selection.rects.length}, 去重后: ${uniqueRects.length}`);
-      
+      // 为每一行创建一个批注下划线
       const newAnnotations: Annotation[] = [];
-      
-      // 为每一行选中的文本创建下划线
-      for (const rect of uniqueRects) {
+      for (const rect of lineRects) {
         const newAnnotation = await annotationsApi.createAnnotation(paperId, {
           page_number: selection.pageNum,
           type: 'text',
           x: rect.left + rect.width / 2,
           y: rect.top + rect.height,
           width: rect.width,
-          height: 4,
+          height: 2,
           color: selectedColor,
           content: commentContent || selection.text.substring(0, 200),
         });
         newAnnotations.push(newAnnotation);
       }
 
-      // 合并新 annotation 并去重（防止重复添加）
+      // 合并新 annotation
       const combined = [...dedupedAnnotations, ...newAnnotations];
       const uniqueMap = new Map<number, Annotation>();
       combined.forEach(a => {
@@ -671,7 +679,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       });
       onAnnotationsChange(Array.from(uniqueMap.values()));
       
-      message.success(`文本批注添加成功 (${newAnnotations.length} 处)`);
+      message.success(`文本批注添加成功 (${newAnnotations.length} 行)`);
       
       // 关闭弹窗并清除状态
       modalOpenRef.current = false;
@@ -751,6 +759,76 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     setTranslationProviderName('');
     window.getSelection()?.removeAllRanges();
     setTextSelection(null);
+  };
+
+  // 保存翻译结果为批注
+  const handleSaveTranslationAsComment = async () => {
+    // 立即保存选择，防止被其他操作清空
+    const selection = savedSelectionRef.current || textSelection;
+    const currentTranslatedText = translatedText;
+    const currentSelectedColor = selectedColor;
+    
+    console.log('[Save Translation] selection:', selection, 'text:', currentTranslatedText);
+    
+    if (!selection || selection.rects.length === 0) {
+      message.error('没有选择文本');
+      return;
+    }
+    
+    if (!currentTranslatedText || currentTranslatedText === '翻译失败，请稍后重试' || currentTranslatedText === '翻译服务暂时不可用，请稍后重试') {
+      message.error('没有有效的翻译结果');
+      return;
+    }
+
+    // 标记弹窗操作中，阻止工具框显示
+    modalOpenRef.current = true;
+
+    try {
+      const lineRects = selection.rects;
+      if (lineRects.length === 0) {
+        message.error('没有有效的选区');
+        return;
+      }
+      
+      // 为每一行创建一个翻译批注下划线
+      const newAnnotations: Annotation[] = [];
+      for (const rect of lineRects) {
+        const newAnnotation = await annotationsApi.createAnnotation(paperId, {
+          page_number: selection.pageNum,
+          type: 'text',
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height,
+          width: rect.width,
+          height: 2,
+          color: currentSelectedColor,
+          content: `[译] ${currentTranslatedText}`,
+        });
+        newAnnotations.push(newAnnotation);
+      }
+
+      // 合并新 annotation
+      const combined = [...dedupedAnnotations, ...newAnnotations];
+      const uniqueMap = new Map<number, Annotation>();
+      combined.forEach(a => {
+        if (a.id && !uniqueMap.has(a.id as number)) {
+          uniqueMap.set(a.id as number, a);
+        }
+      });
+      onAnnotationsChange(Array.from(uniqueMap.values()));
+      
+      message.success(`翻译结果已保存为批注 (${newAnnotations.length} 行)`);
+      
+      // 立即清除选区和工具框，防止弹出
+      window.getSelection()?.removeAllRanges();
+      setTextSelection(null);
+      setToolbarPosition(prev => ({ ...prev, visible: false }));
+      
+      // 关闭弹窗
+      handleCloseTranslate();
+    } catch (error: any) {
+      console.error('保存翻译批注失败:', error);
+      message.error('保存批注失败: ' + (error.message || '未知错误'));
+    }
   };
 
   // 删除批注
@@ -904,7 +982,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                 left: (annotation.x - (annotation.width || 50) / 2) * scaleFactor,
                 top: annotation.y * scaleFactor - 2,
                 width: (annotation.width || 50) * scaleFactor,
-                height: Math.max(3 * scaleFactor, 2),
+                height: Math.max(2 * scaleFactor, 1),
                 backgroundColor: annotation.color || '#1890ff',
                 cursor: readOnly ? 'default' : 'pointer',
                 zIndex: 10,
@@ -1318,11 +1396,26 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
         }
         open={translateModalVisible}
         onCancel={handleCloseTranslate}
-        footer={[
-          <Button key="close" onClick={handleCloseTranslate}>
-            关闭
-          </Button>
-        ]}
+        footer={(
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button onClick={handleCloseTranslate}>
+              关闭
+            </Button>
+            <Button 
+              type="primary" 
+              icon={<SaveOutlined />}
+              onClick={(e) => {
+                console.log('[Button Click] Save translation clicked');
+                e.stopPropagation();
+                handleSaveTranslationAsComment();
+              }}
+              disabled={!translatedText || translatedText === '翻译失败，请稍后重试' || translatedText === '翻译服务暂时不可用，请稍后重试' || translating}
+              loading={translating}
+            >
+              保存为批注
+            </Button>
+          </div>
+        )}
         width={550}
         getContainer={containerNode || undefined}
       >
