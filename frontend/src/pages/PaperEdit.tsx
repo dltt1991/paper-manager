@@ -88,13 +88,13 @@ const PaperEdit: React.FC = () => {
       };
 
       if (isNew) {
-        const newPaper = await papersApi.createPaper(paperData);
+        await papersApi.createPaper(paperData);
         message.success('论文创建成功');
-        navigate(`/papers/${newPaper.id}`);
+        navigate('/');
       } else {
         await papersApi.updatePaper(Number(id), paperData);
         message.success('论文更新成功');
-        navigate(`/papers/${id}`);
+        navigate('/');
       }
     } catch (error: any) {
       message.error('保存失败: ' + error.message);
