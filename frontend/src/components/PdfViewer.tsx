@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { Button, Tooltip, message, Spin, Input, Space, Modal, Radio, Alert } from 'antd';
 import { 
@@ -86,7 +86,8 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   readOnly = false,
 }) => {
   const [numPages, setNumPages] = useState<number>(0);
-  const [scale, setScale] = useState<number>(1.2);
+  const RENDER_SCALE = 2.0; // 固定渲染缩放，避免重新渲染
+  const [displayScale, setDisplayScale] = useState<number>(1.2); // 显示缩放（CSS transform）
   const [error, setError] = useState<string | null>(null);
   const [selectedColor, setSelectedColor] = useState<string>('#ffeb3b');
   const [visiblePages, setVisiblePages] = useState<Set<number>>(new Set([1]));
@@ -307,6 +308,8 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
 
         if (pageNum && pageEl) {
           // 计算相对坐标
+          // 注意：getBoundingClientRect() 返回的是 CSS transform 后的视觉坐标
+          // 需要转换回渲染坐标：视觉坐标 / displayScale = 相对于渲染页面的坐标
           const pageRect = pageEl.getBoundingClientRect();
           const clientRects = range.getClientRects();
           const rects: TextSelectionInfo['rects'] = [];
@@ -315,15 +318,16 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
             const rect = clientRects[i];
             // 确保矩形在页面范围内
             if (rect.width > 0 && rect.height > 0) {
+              // 视觉坐标差值 / displayScale = 渲染坐标系中的相对位置
               const newRect = {
-                left: (rect.left - pageRect.left) / scale,
-                top: (rect.top - pageRect.top) / scale,
-                width: rect.width / scale,
-                height: rect.height / scale,
+                left: (rect.left - pageRect.left) / displayScale,
+                top: (rect.top - pageRect.top) / displayScale,
+                width: rect.width / displayScale,
+                height: rect.height / displayScale,
               };
               
               // 检查是否已存在相同位置的矩形（去重）
-              const threshold = Math.max(0.1, 0.5 / scale);
+              const threshold = Math.max(0.1, 0.5 / RENDER_SCALE);
               const isDuplicate = rects.some(r => 
                 Math.abs(r.left - newRect.left) < threshold && 
                 Math.abs(r.top - newRect.top) < threshold &&
@@ -397,14 +401,14 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       document.removeEventListener('mouseup', handleMouseUp);
       document.removeEventListener('click', handleClickOutside);
     };
-  }, [readOnly, scale]);
+  }, [readOnly, displayScale]);
 
   // 滚动监听 - 优化版本（防抖 + 智能预加载）
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    let scrollTimeout: NodeJS.Timeout;
+    let scrollTimeout: ReturnType<typeof setTimeout>;
     
     const handleScroll = () => {
       // 清除之前的定时器（防抖）
@@ -452,13 +456,38 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
       }, 100); // 100ms 防抖
     };
 
+    // Ctrl + 滚轮缩放PDF，同时阻止浏览器默认缩放（带防抖）
+    let wheelTimeout: ReturnType<typeof setTimeout> | null = null;
+    let accumulatedDelta = 0;
+    
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault();
+        // 减小步长到 0.05，让缩放更丝滑
+        accumulatedDelta += e.deltaY > 0 ? -0.05 : 0.05;
+        
+        if (wheelTimeout) {
+          clearTimeout(wheelTimeout);
+        }
+        
+        wheelTimeout = setTimeout(() => {
+          setDisplayScale(prev => Math.max(0.5, Math.min(prev + accumulatedDelta, 3)));
+          accumulatedDelta = 0;
+        }, 30); // 30ms 防抖，响应更快
+      }
+    };
+
     container.addEventListener('scroll', handleScroll, { passive: true });
+    // 使用非passive监听器来阻止默认行为
+    container.addEventListener('wheel', handleWheel, { passive: false });
     // 初始计算
     setTimeout(handleScroll, 200);
     
     return () => {
       container.removeEventListener('scroll', handleScroll);
+      container.removeEventListener('wheel', handleWheel);
       clearTimeout(scrollTimeout);
+      if (wheelTimeout) clearTimeout(wheelTimeout);
     };
   }, [numPages]);
 
@@ -499,27 +528,13 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
     message.error('PDF加载失败');
   };
 
-  // 缩放控制 - 缩放时清理缓存并重新计算可视页面
+  // 缩放控制 - 只调整 displayScale，不重新渲染 PDF
   const handleZoomIn = () => {
-    setScale(prev => {
-      const newScale = Math.min(prev + 0.2, 3);
-      // 缩放后清理已渲染页面缓存（强制重新渲染）
-      if (newScale !== prev) {
-        setRenderedPages(new Set([currentPage]));
-      }
-      return newScale;
-    });
+    setDisplayScale(prev => Math.min(prev + 0.1, 3));
   };
   
   const handleZoomOut = () => {
-    setScale(prev => {
-      const newScale = Math.max(prev - 0.2, 0.5);
-      // 缩放后清理已渲染页面缓存（强制重新渲染）
-      if (newScale !== prev) {
-        setRenderedPages(new Set([currentPage]));
-      }
-      return newScale;
-    });
+    setDisplayScale(prev => Math.max(prev - 0.1, 0.5));
   };
 
   // 隐藏工具框
@@ -825,10 +840,13 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
   };
 
   // 渲染页面的批注
-  const renderPageAnnotations = (pageNum: number) => {
+  // insideTransform: 是否在 CSS transform 容器内，如果在内部则使用 RENDER_SCALE 而不是 displayScale
+  const renderPageAnnotations = (pageNum: number, insideTransform = false) => {
     // 使用全局去重后的 annotations
     const pageAnnotations = dedupedAnnotations.filter(a => a.page_number === pageNum);
     const pageNativeAnnotations = (externalNativeAnnotations || []).filter(a => a.page_number === pageNum);
+    // 在 transform 容器内使用 RENDER_SCALE，外部使用 displayScale
+    const scaleFactor = insideTransform ? RENDER_SCALE : displayScale;
     
     const highlights = pageAnnotations.filter(a => a.type === 'highlight');
     const texts = pageAnnotations.filter(a => a.type === 'text');
@@ -841,10 +859,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
             key={`highlight-${annotation.id}`}
             style={{
               position: 'absolute',
-              left: annotation.x * scale,
-              top: annotation.y * scale,
-              width: (annotation.width || 50) * scale,
-              height: (annotation.height || 20) * scale,
+              left: annotation.x * scaleFactor,
+              top: annotation.y * scaleFactor,
+              width: (annotation.width || 50) * scaleFactor,
+              height: (annotation.height || 20) * scaleFactor,
               backgroundColor: annotation.color || '#ffeb3b',
               opacity: 0.4,
               cursor: readOnly ? 'default' : 'pointer',
@@ -883,10 +901,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
             <div
               style={{
                 position: 'absolute',
-                left: (annotation.x - (annotation.width || 50) / 2) * scale,
-                top: annotation.y * scale - 2,
-                width: (annotation.width || 50) * scale,
-                height: Math.max(3 * scale, 2),
+                left: (annotation.x - (annotation.width || 50) / 2) * scaleFactor,
+                top: annotation.y * scaleFactor - 2,
+                width: (annotation.width || 50) * scaleFactor,
+                height: Math.max(3 * scaleFactor, 2),
                 backgroundColor: annotation.color || '#1890ff',
                 cursor: readOnly ? 'default' : 'pointer',
                 zIndex: 10,
@@ -939,10 +957,10 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
             <div
               style={{
                 position: 'absolute',
-                left: annotation.x * scale,
-                top: annotation.y * scale,
-                width: (annotation.width || 50) * scale,
-                height: (annotation.height || 20) * scale,
+                left: annotation.x * scaleFactor,
+                top: annotation.y * scaleFactor,
+                width: (annotation.width || 50) * scaleFactor,
+                height: (annotation.height || 20) * scaleFactor,
                 backgroundColor: annotation.color || '#faad14',
                 opacity: 0.3,
                 cursor: readOnly ? 'default' : 'pointer',
@@ -1040,7 +1058,7 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
 
         <Space>
           <Button icon={<ZoomOutOutlined />} onClick={handleZoomOut} />
-          <span>{Math.round(scale * 100)}%</span>
+          <span>{Math.round(displayScale * 100)}%</span>
           <Button icon={<ZoomInOutlined />} onClick={handleZoomIn} />
         </Space>
 
@@ -1078,10 +1096,6 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
               {Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => (
                 <div 
                   key={pageNum}
-                  data-page-number={pageNum}
-                  ref={el => {
-                    if (el) pageRefs.current.set(pageNum, el);
-                  }}
                   style={{ 
                     position: 'relative',
                     boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
@@ -1103,37 +1117,54 @@ const PdfViewer: React.FC<PdfViewerProps> = ({
                   </div>
                   
                   {/* PDF 页面 - 优化渲染逻辑 */}
-                  {renderPageRange.has(pageNum) ? (
-                    <MemoizedPage
-                      pageNumber={pageNum}
-                      scale={scale}
-                      renderTextLayer={visiblePages.has(pageNum)} // 只在可见页面渲染文本层
-                      renderAnnotationLayer={false} // 禁用内置批注层（使用自定义批注）
-                      loading={
-                        <div style={{ width: 600 * scale, height: 800 * scale, backgroundColor: '#fff' }}>
-                          <Spin size="small" />
-                        </div>
-                      }
-                      onRenderSuccess={() => {
-                        // 页面渲染成功后加入缓存
-                        setRenderedPages(prev => new Set(prev).add(pageNum));
-                      }}
-                    />
-                  ) : (
-                    <div style={{ 
-                      width: 600 * scale, 
-                      height: 800 * scale, 
-                      backgroundColor: '#525659',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}>
-                      <span style={{ color: '#999', fontSize: 14 }}>第 {pageNum} 页</span>
-                    </div>
-                  )}
-                  
-                  {/* 该页面的批注 */}
-                  {renderPageAnnotations(pageNum)}
+                  {/* 使用固定 renderScale 渲染，CSS transform 缩放，避免重新渲染闪烁 */}
+                  {/* 批注也放在 transform 容器内，自动跟随缩放 */}
+                  {/* data-page-number 和 ref 放在这里，确保坐标计算基于 transform 容器 */}
+                  <div 
+                    data-page-number={pageNum}
+                    ref={el => {
+                      if (el) pageRefs.current.set(pageNum, el);
+                    }}
+                    style={{
+                      transform: `scale(${displayScale / RENDER_SCALE})`,
+                      transformOrigin: 'top center',
+                      width: 600 * RENDER_SCALE,
+                      height: renderPageRange.has(pageNum) ? undefined : 800 * RENDER_SCALE,
+                      position: 'relative',
+                    }}
+                  >
+                    {renderPageRange.has(pageNum) ? (
+                      <MemoizedPage
+                        pageNumber={pageNum}
+                        scale={RENDER_SCALE}
+                        renderTextLayer={visiblePages.has(pageNum)} // 只在可见页面渲染文本层
+                        renderAnnotationLayer={false} // 禁用内置批注层（使用自定义批注）
+                        loading={
+                          <div style={{ width: 600 * RENDER_SCALE, height: 800 * RENDER_SCALE, backgroundColor: '#fff' }}>
+                            <Spin size="small" />
+                          </div>
+                        }
+                        onRenderSuccess={() => {
+                          // 页面渲染成功后加入缓存
+                          setRenderedPages(prev => new Set(prev).add(pageNum));
+                        }}
+                      />
+                    ) : (
+                      <div style={{ 
+                        width: 600 * RENDER_SCALE, 
+                        height: 800 * RENDER_SCALE, 
+                        backgroundColor: '#525659',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}>
+                        <span style={{ color: '#999', fontSize: 14 }}>第 {pageNum} 页</span>
+                      </div>
+                    )}
+                    
+                    {/* 该页面的批注 - 放在 transform 容器内自动跟随缩放 */}
+                    {renderPageAnnotations(pageNum, true)}
+                  </div>
                 </div>
               ))}
             </div>
