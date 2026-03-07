@@ -1967,13 +1967,13 @@ const PdfViewer = React.forwardRef<PdfViewerRef, PdfViewerProps>(({
                     boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
                     backgroundColor: 'white',
                     // 根据缩放调整高度，避免 transform 导致的布局留白
-                    height: 800 * displayScale + 40, // 40px 是页码提示的间距
+                    height: 800 * displayScale + 8, // 8px 是页码提示的间距
                   }}
                 >
                   {/* 页码提示 - 显示在页面内部上方，避免被遮挡 */}
                   <div style={{
                     position: 'absolute',
-                    top: 8,
+                    top: 4,
                     left: 0,
                     right: 0,
                     textAlign: 'center',
