@@ -385,42 +385,24 @@ const PaperList: React.FC = () => {
       <Sider
         width={240}
         theme="light"
-        collapsible
         collapsed={siderCollapsed}
-        onCollapse={setSiderCollapsed}
         trigger={null}
         collapsedWidth={60}
         style={{
           borderRight: '1px solid #f0f0f0',
           background: '#fff',
+          overflow: 'hidden',
         }}
       >
         <div style={{ 
-          padding: '16px', 
+          padding: siderCollapsed ? '16px 0' : '16px', 
           borderBottom: '1px solid #f0f0f0',
           display: 'flex',
           alignItems: 'center',
-          justifyContent: siderCollapsed ? 'center' : 'space-between'
+          justifyContent: 'center'
         }}>
-          <Space>
-            <TagsOutlined />
-            {!siderCollapsed && <Text strong>标签筛选</Text>}
-          </Space>
-          {siderCollapsed ? (
-            <Button
-              type="text"
-              icon={<MenuUnfoldOutlined />}
-              onClick={() => setSiderCollapsed(false)}
-              title="展开侧边栏"
-            />
-          ) : (
-            <Button
-              type="text"
-              icon={<MenuFoldOutlined />}
-              onClick={() => setSiderCollapsed(true)}
-              title="收起侧边栏"
-            />
-          )}
+          <TagsOutlined />
+          {!siderCollapsed && <Text strong style={{ marginLeft: 8 }}>标签筛选</Text>}
         </div>
         <Menu
           mode="inline"
@@ -440,6 +422,33 @@ const PaperList: React.FC = () => {
           })}
         />
       </Sider>
+
+      {/* 左下角展开/收起侧边栏按钮 */}
+      <div
+        style={{
+          position: 'fixed',
+          left: 20,
+          bottom: 20,
+          zIndex: 1000,
+        }}
+      >
+        <Button
+          type="primary"
+          icon={siderCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+          onClick={() => setSiderCollapsed(!siderCollapsed)}
+          title={siderCollapsed ? "展开侧边栏" : "收起侧边栏"}
+          style={{
+            borderRadius: '50%',
+            width: 36,
+            height: 36,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            padding: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        />
+      </div>
 
       {/* 主内容区 */}
       <Content style={{ padding: 24, background: '#f5f5f5' }}>
