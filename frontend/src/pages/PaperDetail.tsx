@@ -359,32 +359,35 @@ const PaperDetail: React.FC = () => {
         </div>
         )}
 
-        {/* 侧边栏隐藏时的展开按钮 */}
-        {sidebarHidden && (
-          <div
+        {/* 左下角展开/收起侧边栏按钮 - 与画笔按钮对称 */}
+        <div
+          style={{
+            position: 'fixed',
+            left: 20,
+            bottom: 20,
+            zIndex: 1000,
+          }}
+        >
+          <Button
+            type="primary"
+            icon={sidebarHidden ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+            onClick={toggleSidebar}
+            title={sidebarHidden ? "展开侧边栏" : "收起侧边栏"}
             style={{
-              position: 'absolute',
-              left: 0,
-              top: 16,
-              zIndex: 100,
+              borderRadius: '50%',
+              width: 36,
+              height: 36,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+              padding: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
             }}
-          >
-            <Button
-              type="primary"
-              icon={<MenuUnfoldOutlined />}
-              onClick={toggleSidebar}
-              style={{
-                borderRadius: '0 4px 4px 0',
-                boxShadow: '2px 0 8px rgba(0,0,0,0.15)',
-              }}
-            >
-              展开
-            </Button>
-          </div>
-        )}
+          />
+        </div>
 
-        {/* 拖拽分隔条或收起按钮 */}
-        {!sidebarHidden ? (
+        {/* 拖拽分隔条 */}
+        {!sidebarHidden && (
         <div
           style={{
             width: 32,
@@ -393,21 +396,8 @@ const PaperDetail: React.FC = () => {
             flexDirection: 'column',
             alignItems: 'center',
             paddingTop: 16,
-            gap: 8,
           }}
         >
-          {/* 收起按钮 */}
-          <Button
-            type="text"
-            icon={<MenuFoldOutlined />}
-            size="small"
-            onClick={toggleSidebar}
-            title="收起侧边栏"
-            style={{
-              color: '#666',
-            }}
-          />
-          {/* 拖拽分隔条 */}
           <div
             style={{
               flex: 1,
@@ -439,7 +429,7 @@ const PaperDetail: React.FC = () => {
             />
           </div>
         </div>
-        ) : null}
+        )}
 
         {/* 右侧：PDF预览和批注 */}
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -458,34 +448,36 @@ const PaperDetail: React.FC = () => {
             }}
           >
             <Card 
-              title="PDF预览" 
+              title={isFullscreen ? null : "PDF预览"}
               style={{ height: '100%' }}
-              bodyStyle={{ padding: 0, height: 'calc(100% - 57px)' }}
+              bodyStyle={{ padding: 0, height: isFullscreen ? '100%' : 'calc(100% - 57px)' }}
               extra={
-                <Button 
-                  icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />} 
-                  size="small"
-                  onClick={async () => {
-                    if (!isFullscreen) {
-                      try {
-                        await pdfContainerRef.current?.requestFullscreen();
-                        setIsFullscreen(true);
-                      } catch (err) {
-                        console.error('进入全屏失败:', err);
-                        message.error('进入全屏失败');
+                isFullscreen ? null : (
+                  <Button 
+                    icon={isFullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />} 
+                    size="small"
+                    onClick={async () => {
+                      if (!isFullscreen) {
+                        try {
+                          await pdfContainerRef.current?.requestFullscreen();
+                          setIsFullscreen(true);
+                        } catch (err) {
+                          console.error('进入全屏失败:', err);
+                          message.error('进入全屏失败');
+                        }
+                      } else {
+                        try {
+                          await document.exitFullscreen();
+                          setIsFullscreen(false);
+                        } catch (err) {
+                          console.error('退出全屏失败:', err);
+                        }
                       }
-                    } else {
-                      try {
-                        await document.exitFullscreen();
-                        setIsFullscreen(false);
-                      } catch (err) {
-                        console.error('退出全屏失败:', err);
-                      }
-                    }
-                  }}
-                >
-                  {isFullscreen ? '退出全屏' : '全屏'}
-                </Button>
+                    }}
+                  >
+                    {isFullscreen ? '退出全屏' : '全屏'}
+                  </Button>
+                )
               }
             >
               {hasPdf ? (
@@ -499,6 +491,7 @@ const PaperDetail: React.FC = () => {
                   onAnnotationsChange={setAnnotations}
                   onNativeAnnotationDelete={handleNativeAnnotationDelete}
                   onNativeAnnotationUpdate={handleNativeAnnotationUpdate}
+                  isFullscreen={isFullscreen}
                 />
               ) : (
                 <Empty

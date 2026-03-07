@@ -43,6 +43,7 @@ interface PdfViewerProps {
   onNativeAnnotationDelete?: (annotId: string) => void;  // 新增：删除原生批注回调
   onNativeAnnotationUpdate?: (annotId: string, content: string) => void;  // 新增：更新原生批注回调
   readOnly?: boolean;
+  isFullscreen?: boolean;  // 新增：是否全屏模式
 }
 
 // 高亮颜色选项
@@ -99,6 +100,7 @@ const PdfViewer = React.forwardRef<PdfViewerRef, PdfViewerProps>(({
   onNativeAnnotationDelete,
   onNativeAnnotationUpdate,
   readOnly = false,
+  isFullscreen = false,
 }, ref) => {
   const [numPages, setNumPages] = useState<number>(0);
   const RENDER_SCALE = 2.0; // 固定渲染缩放，避免重新渲染
@@ -145,6 +147,19 @@ const PdfViewer = React.forwardRef<PdfViewerRef, PdfViewerProps>(({
   
   // 容器节点状态（用于 Modal getContainer）
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
+  
+  // 工具栏显示状态 - 默认隐藏，鼠标移到顶部触发区域时显示
+  const [isToolbarVisible, setIsToolbarVisible] = useState(false);
+  const toolbarHideTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (toolbarHideTimeoutRef.current) {
+        clearTimeout(toolbarHideTimeoutRef.current);
+      }
+    };
+  }, []);
   
   const containerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -1783,16 +1798,61 @@ const PdfViewer = React.forwardRef<PdfViewerRef, PdfViewerProps>(({
     );
   }
 
+  // 处理鼠标进入/离开工具栏
+  const handleToolbarMouseEnter = () => {
+    if (toolbarHideTimeoutRef.current) {
+      clearTimeout(toolbarHideTimeoutRef.current);
+      toolbarHideTimeoutRef.current = null;
+    }
+    setIsToolbarVisible(true);
+  };
+
+  const handleToolbarMouseLeave = () => {
+    // 延迟隐藏，给用户时间移动到工具栏上
+    toolbarHideTimeoutRef.current = setTimeout(() => {
+      setIsToolbarVisible(false);
+    }, 300);
+  };
+
   return (
-    <div ref={setContainerNode} style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
-      {/* 工具栏 */}
-      <div style={{ 
+    <div 
+      ref={setContainerNode} 
+      style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}
+    >
+      {/* 工具栏悬浮触发区域 - 只在顶部显示 */}
+      <div 
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: isFullscreen ? '12px' : '52px', // 全屏时更小的触发区域
+          zIndex: 101,
+          cursor: 'default',
+        }}
+        onMouseEnter={handleToolbarMouseEnter}
+      />
+      
+      {/* 工具栏 - 全屏和非全屏都显示，悬浮在顶部 */}
+      <div 
+        onMouseEnter={handleToolbarMouseEnter}
+        onMouseLeave={handleToolbarMouseLeave}
+        style={{ 
         padding: '8px 16px', 
         borderBottom: '1px solid #f0f0f0', 
         display: 'flex', 
         justifyContent: 'space-between',
         alignItems: 'center',
-        backgroundColor: '#fafafa'
+        backgroundColor: isFullscreen ? 'rgba(250, 250, 250, 0.95)' : '#fafafa',
+        opacity: isToolbarVisible ? 1 : 0,
+        transform: isToolbarVisible ? 'translateY(0)' : 'translateY(-100%)',
+        transition: 'opacity 0.3s ease, transform 0.3s ease',
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        zIndex: 100,
+        boxShadow: isFullscreen ? '0 2px 8px rgba(0,0,0,0.15)' : 'none',
       }}>
         {!readOnly && (
           <Space>
@@ -1880,7 +1940,7 @@ const PdfViewer = React.forwardRef<PdfViewerRef, PdfViewerProps>(({
           flex: 1, 
           overflow: 'auto', 
           backgroundColor: '#525659',
-          padding: '20px 0',
+          padding: '52px 0 20px 0', // 统一顶部padding给工具栏留空间
         }}
       >
         {error ? (
