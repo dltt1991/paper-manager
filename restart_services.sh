@@ -7,14 +7,43 @@
 # 切换到脚本所在目录
 cd "$(dirname "$0")"
 
-# 获取服务器 IP
-SERVER_IP=$(hostname -I | awk '{print $1}')
+# 获取服务器 IP（优先使用用户指定的 IP）
+if [ -n "$SERVER_IP" ]; then
+    echo "使用环境变量指定的 IP: $SERVER_IP"
+else
+    # 尝试多种方式获取本机 IP
+    # macOS
+    SERVER_IP=$(ifconfig 2>/dev/null | grep "inet " | grep -v "127.0.0.1" | head -1 | awk '{print $2}')
+    # Linux
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(ip addr 2>/dev/null | grep "inet " | grep -v "127.0.0.1" | head -1 | awk '{print $2}' | cut -d/ -f1)
+    fi
+    # fallback
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    # 最终 fallback 到 localhost
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP="localhost"
+    fi
+fi
 
 echo "=========================================="
 echo "   重启论文管理系统服务"
 echo "=========================================="
 echo ""
 echo "服务器 IP: $SERVER_IP"
+echo ""
+echo "本机所有可用 IP 地址："
+if command -v ifconfig &> /dev/null; then
+    ifconfig 2>/dev/null | grep "inet " | grep -v "127.0.0.1" | awk '{print "  - " $2}'
+elif command -v ip &> /dev/null; then
+    ip addr 2>/dev/null | grep "inet " | grep -v "127.0.0.1" | awk '{print "  - " $2}' | cut -d/ -f1
+fi
+echo "  - 127.0.0.1 (本地)"
+echo ""
+echo "提示: 如需指定特定 IP，请设置环境变量 SERVER_IP，例如:"
+echo "  export SERVER_IP=192.168.1.100 && ./restart_services.sh"
 echo ""
 
 # 先停止服务

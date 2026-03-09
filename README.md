@@ -32,18 +32,43 @@
 
 ### 环境要求
 
-- Python 3.11+
+- Python 3.9+ （推荐 3.11+）
 - Node.js 18+
 - SQLite（内置，无需额外安装）
 
-### 1. 克隆项目
+### 方式一：自动化配置（推荐）
+
+使用一键配置脚本自动完成环境搭建：
+
+```bash
+git clone <repository-url>
+cd paper-manager
+
+# 快速配置（自动完成所有步骤）
+./setup.sh --quick
+
+# 或使用交互式菜单
+./setup.sh
+```
+
+脚本会自动完成：
+- ✅ 检查 Python/Node.js 环境
+- ✅ 创建 Python 虚拟环境
+- ✅ 安装后端依赖
+- ✅ 配置环境变量
+- ✅ 安装前端依赖
+- ✅ 检查端口占用
+
+### 方式二：手动配置
+
+#### 1. 克隆项目
 
 ```bash
 git clone <repository-url>
 cd paper-manager
 ```
 
-### 2. 配置后端
+#### 2. 配置后端
 
 ```bash
 cd backend
@@ -66,7 +91,7 @@ cp .env.example .env
 # - KIMI_API_KEY: Kimi API 密钥（可选，用于 AI 摘要）
 ```
 
-### 3. 配置前端
+#### 3. 配置前端
 
 ```bash
 cd frontend
@@ -105,9 +130,20 @@ pnpm dev
 
 ### 5. 访问应用
 
-- 🌐 前端界面: http://localhost:5173
-- 🔧 后端 API: http://localhost:8000
-- 📚 API 文档: http://localhost:8000/docs
+```bash
+# 本地访问
+- 前端界面: http://localhost:5173
+- 后端 API:  http://localhost:8000
+- API 文档:  http://localhost:8000/docs
+
+# 远程访问（同一局域网内其他设备）
+# 先设置本机 IP 地址，然后重启服务
+export SERVER_IP=192.168.x.x  # 替换为你的实际 IP
+./restart_services.sh
+
+# 然后其他设备可以通过以下地址访问
+# http://192.168.x.x:5173
+```
 
 ---
 
@@ -286,10 +322,29 @@ sudo systemctl start paper-manager
 
 | 脚本 | 说明 |
 |-----|------|
+| `./setup.sh` | 自动化环境配置脚本（交互式/快速模式） |
 | `./start_backend.sh` | 启动后端服务 |
 | `./start_frontend.sh` | 启动前端开发服务器 |
 | `./stop_services.sh` | 停止所有服务 |
 | `./restart_services.sh` | 重启所有服务 |
+
+### setup.sh 使用说明
+
+```bash
+# 快速模式 - 自动完成所有配置，无交互
+./setup.sh --quick
+
+# 交互式菜单 - 选择具体配置项
+./setup.sh
+```
+
+菜单选项：
+- **快速配置** - 一键完成环境搭建
+- **完整配置** - 交互式逐步配置
+- **仅安装后端** - 单独配置后端环境
+- **仅安装前端** - 单独配置前端环境
+- **重新配置环境变量** - 重新生成 .env 文件
+- **初始化数据库** - 运行数据库迁移和初始化
 
 ---
 
@@ -327,4 +382,4 @@ sudo systemctl start paper-manager
 
 ---
 
-**最新更新**: 2026-03-03
+**最新更新**: 2026-03-09
